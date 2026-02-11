@@ -4,6 +4,22 @@ Automated PowerShell script that generates an Excel report tracking Azure servic
 
 > **Note:** This report summarizes **observed availability and incidents** for your resources using Resource Health / Service Health signals. It does not replace [Microsoft's official Service Level Agreements](https://www.microsoft.com/licensing/docs/view/Service-Level-Agreements-SLA-for-Online-Services).
 
+## Quick Start
+
+```powershell
+# 1. Install required modules (one-time)
+Install-Module Az -Scope CurrentUser -Force
+Install-Module ImportExcel -Scope CurrentUser -Force
+
+# 2. Connect to Azure
+Connect-AzAccount
+
+# 3. Run the report (all subscriptions & regions by default)
+.\Get-AzureSLAReport.ps1
+
+# 4. The generated .xlsx opens automatically — done!
+```
+
 ---
 
 ## Overview
