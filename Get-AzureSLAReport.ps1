@@ -241,6 +241,22 @@ $script:RegionDisplayNames = @{}
 
 #region ── 3. DATA COLLECTION FUNCTIONS ──────────────────────────────────────────
 
+function Convert-TicksToDateTime {
+    <#
+    .SYNOPSIS
+        Converts .NET ticks (Int64) to a PowerShell DateTime (UTC).
+        ServiceHealthResources stores ImpactStartTime / ImpactMitigationTime as
+        ticks, not ISO‑8601 strings.
+    #>
+    param([object]$Ticks)
+    if ($null -eq $Ticks) { return $null }
+    try {
+        return [datetime]::new([long]$Ticks, [System.DateTimeKind]::Utc)
+    } catch {
+        return $null
+    }
+}
+
 function Get-ResourceHealthEvents {
     <#
     .SYNOPSIS
@@ -256,27 +272,35 @@ function Get-ResourceHealthEvents {
 
     Write-Host "── Querying Resource Health events via Resource Graph ──" -ForegroundColor Cyan
 
-    # Query resource health availability status changes
+    # Pull all service-issue events; date filtering done in PowerShell because
+    # ImpactStartTime is stored as .NET ticks, not a Kusto-native datetime.
     $query = @"
-ServiceHealthResources
-| where type == "microsoft.resourcehealth/events"
-| where properties.EventType == "ServiceIssue"
-| extend impactStartTime = todatetime(properties.ImpactStartTime)
-| extend impactEndTime   = todatetime(properties.ImpactMitigationTime)
+servicehealthresources
+| where type =~ 'microsoft.resourcehealth/events'
+| where tostring(properties.EventType) =~ 'ServiceIssue'
 | extend status          = tostring(properties.Status)
-| extend title           = tostring(properties.Title)
 | extend summary         = tostring(properties.Summary)
 | extend eventLevel      = tostring(properties.EventLevel)
 | extend impactedServices = properties.Impact
-| where impactStartTime >= datetime('$($StartDate.ToString("yyyy-MM-dd"))') and impactStartTime <= datetime('$($EndDate.ToString("yyyy-MM-dd"))')
-| project id, name, impactStartTime, impactEndTime, status, title, summary, eventLevel, impactedServices
-| order by impactStartTime desc
+| project id, name, properties, status, Title = properties.Title, summary, eventLevel, impactedServices
 "@
 
     try {
-        $results = Search-AzGraph -Query $query -First 1000 -Subscription $script:ResolvedSubscriptionIds -ErrorAction Stop
-        Write-Host "[  OK  ] Retrieved $($results.Count) service health events" -ForegroundColor Green
-        return $results
+        $raw = Search-AzGraph -Query $query -First 1000 -Subscription $script:ResolvedSubscriptionIds -ErrorAction Stop
+
+        # Convert ticks → DateTime and filter by date range in PowerShell
+        $results = foreach ($r in $raw) {
+            $start = Convert-TicksToDateTime $r.properties.ImpactStartTime
+            $end   = Convert-TicksToDateTime $r.properties.ImpactMitigationTime
+            if ($null -eq $start) { continue }
+            if ($start -lt $StartDate -or $start -gt $EndDate) { continue }
+
+            $r | Add-Member -NotePropertyName 'impactStartTime' -NotePropertyValue $start -Force -PassThru |
+                 Add-Member -NotePropertyName 'impactEndTime'   -NotePropertyValue $end   -Force -PassThru
+        }
+
+        Write-Host "[  OK  ] Retrieved $(@($results).Count) service health events (filtered to date range)" -ForegroundColor Green
+        return @($results)
     } catch {
         Write-Host "[WARN ] Resource Graph query failed: $($_.Exception.Message)" -ForegroundColor Yellow
         Write-Host "[INFO ] Falling back to Activity Log method..." -ForegroundColor Yellow
@@ -473,7 +497,7 @@ HealthResources
 "@
 
     try {
-        $healthData = Search-AzGraph -Query $query -First 5000 -Subscription $script:ResolvedSubscriptionIds -ErrorAction Stop
+        $healthData = Search-AzGraph -Query $query -First 1000 -Subscription $script:ResolvedSubscriptionIds -ErrorAction Stop
         Write-Host "[  OK  ] Retrieved $($healthData.Count) availability records" -ForegroundColor Green
         return $healthData
     } catch {
@@ -497,29 +521,38 @@ function Get-ServiceHealthIncidents {
 
     Write-Host "── Querying Service Health incidents (detailed) ──" -ForegroundColor Cyan
 
+    # Pull all events; date filtering done in PowerShell because
+    # ImpactStartTime is stored as .NET ticks, not a Kusto-native datetime.
     $query = @"
-ServiceHealthResources
-| where type =~ "microsoft.resourcehealth/events"
+servicehealthresources
+| where type =~ 'microsoft.resourcehealth/events'
 | extend eventType        = tostring(properties.EventType)
 | extend status           = tostring(properties.Status)
-| extend title            = tostring(properties.Title)
 | extend summary          = tostring(properties.Summary)
-| extend impactStartTime  = todatetime(properties.ImpactStartTime)
-| extend impactEndTime    = todatetime(properties.ImpactMitigationTime)
-| extend lastUpdateTime   = todatetime(properties.LastUpdateTime)
 | extend level            = tostring(properties.EventLevel)
 | extend impactedServices = properties.Impact
-| where impactStartTime >= datetime('$($StartDate.ToString("yyyy-MM-dd"))') 
-    and impactStartTime <= datetime('$($EndDate.ToString("yyyy-MM-dd"))')
-| project name, eventType, status, title, summary, impactStartTime, impactEndTime,
-          lastUpdateTime, level, impactedServices
-| order by impactStartTime desc
+| project name, eventType, status, Title = properties.Title, summary, level, impactedServices, properties
+| order by name desc
 "@
 
     try {
-        $incidents = Search-AzGraph -Query $query -First 1000 -Subscription $script:ResolvedSubscriptionIds -ErrorAction Stop
-        Write-Host "[  OK  ] Retrieved $($incidents.Count) service health incidents" -ForegroundColor Green
-        return $incidents
+        $raw = Search-AzGraph -Query $query -First 1000 -Subscription $script:ResolvedSubscriptionIds -ErrorAction Stop
+
+        # Convert ticks → DateTime and filter by date range in PowerShell
+        $incidents = foreach ($r in $raw) {
+            $start  = Convert-TicksToDateTime $r.properties.ImpactStartTime
+            $end    = Convert-TicksToDateTime $r.properties.ImpactMitigationTime
+            $update = Convert-TicksToDateTime $r.properties.LastUpdateTime
+            if ($null -eq $start) { continue }
+            if ($start -lt $StartDate -or $start -gt $EndDate) { continue }
+
+            $r | Add-Member -NotePropertyName 'impactStartTime' -NotePropertyValue $start  -Force -PassThru |
+                 Add-Member -NotePropertyName 'impactEndTime'   -NotePropertyValue $end    -Force -PassThru |
+                 Add-Member -NotePropertyName 'lastUpdateTime'  -NotePropertyValue $update -Force -PassThru
+        }
+
+        Write-Host "[  OK  ] Retrieved $(@($incidents).Count) service health incidents (filtered to date range)" -ForegroundColor Green
+        return @($incidents)
     } catch {
         Write-Host "[WARN ] Service health incidents query failed: $($_.Exception.Message)" -ForegroundColor Yellow
         return @()
@@ -1172,12 +1205,12 @@ try {
         -EndDate $endDate
 
     $incidentsTable = Build-IncidentsTable `
-        -Incidents ($incidents1m + $healthEvents) `
+        -Incidents (@($incidents1m) + @($healthEvents)) `
         -Alerts $alerts1m `
         -TargetRegions $Regions
 
     $healthTimeline = Build-ServiceHealthTimeline `
-        -Incidents ($incidents12m + $healthEvents) `
+        -Incidents (@($incidents12m) + @($healthEvents)) `
         -TargetRegions $Regions `
         -StartDate $startDate12m `
         -EndDate $endDate
