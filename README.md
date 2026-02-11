@@ -80,7 +80,7 @@ Connect-AzAccount
 
 This will:
 - Query **all subscriptions** your account can access
-- Check **Canada Central** and **Canada East**
+- Auto-discover **all regions** that contain tracked resources (Compute, SQL DB, Web Apps, Storage)
 - Cover the past **12 months** for SLA data
 - Cover the past **1 month** for incidents
 - Save the report to the script directory as `AzureSLA_Report_<timestamp>.xlsx`
@@ -88,7 +88,7 @@ This will:
 ### 3. Run with Custom Parameters
 
 ```powershell
-# Custom regions, time range, and output path
+# Specific regions and time range
 .\Get-AzureSLAReport.ps1 `
     -Regions @("canadacentral", "canadaeast") `
     -MonthsBack 6 `
@@ -98,15 +98,17 @@ This will:
 .\Get-AzureSLAReport.ps1 `
     -SubscriptionIds @("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "11111111-2222-3333-4444-555555555555")
 
-# Run for a single subscription
-.\Get-AzureSLAReport.ps1 -SubscriptionIds @("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+# Combine: specific regions + specific subscriptions
+.\Get-AzureSLAReport.ps1 `
+    -Regions @("canadacentral", "eastus") `
+    -SubscriptionIds @("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
 ```
 
 ### Parameters
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `-Regions` | `string[]` | `@("canadacentral", "canadaeast")` | Azure region identifiers to include |
+| `-Regions` | `string[]` | `@()` (all regions with resources) | Azure region identifiers. Leave empty to auto-discover all regions containing tracked resources |
 | `-MonthsBack` | `int` | `12` | Number of months of historical SLA data |
 | `-OutputPath` | `string` | `.\AzureSLA_Report_<timestamp>.xlsx` | Full path for the output Excel file |
 | `-SubscriptionIds` | `string[]` | `@()` (all subscriptions) | Specific subscription IDs to query. Leave empty to query ALL enabled subscriptions |
@@ -115,22 +117,15 @@ This will:
 
 ## Implementation Guide
 
-### Adding New Regions
+### Filtering by Region
 
-1. Add the region identifier to the `-Regions` parameter:
-   ```powershell
-   .\Get-AzureSLAReport.ps1 -Regions @("canadacentral", "canadaeast", "eastus", "westus2")
-   ```
+By default the script auto-discovers all regions that contain tracked resources. To limit to specific regions:
 
-2. Update the `$RegionDisplayNames` hashtable in the script to include friendly names:
-   ```powershell
-   $RegionDisplayNames = @{
-       'canadacentral' = 'Canada Central'
-       'canadaeast'    = 'Canada East'
-       'eastus'        = 'East US'
-       'westus2'       = 'West US 2'
-   }
-   ```
+```powershell
+.\Get-AzureSLAReport.ps1 -Regions @("canadacentral", "canadaeast", "eastus", "westus2")
+```
+
+Region display names are resolved automatically from Azure — no manual mapping needed.
 
 ### Adding New Service Categories
 

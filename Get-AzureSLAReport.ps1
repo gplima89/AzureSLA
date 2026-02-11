@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     Generates an Excel report with:
-      - Tab 1 (SLA Overview): Resource availability aggregated by region (Canada Central, Canada East),
+      - Tab 1 (SLA Overview): Resource availability aggregated by region,
         service category (Compute, SQL DB, Web Apps, Storage), and month for the past 12 months.
       - Tab 2 (Incidents & Alerts): Service Health incidents and alerts reported in your environment
         for the past month.
@@ -26,7 +26,8 @@
 
 [CmdletBinding()]
 param(
-    [string[]]$Regions = @("canadacentral", "canadaeast"),
+    # Region scope: leave empty for ALL regions, or specify specific ones
+    [string[]]$Regions = @(),
     [int]$MonthsBack = 12,
     [string]$OutputPath = (Join-Path $PSScriptRoot "AzureSLA_Report_$(Get-Date -Format 'yyyyMMdd_HHmmss').xlsx"),
 
@@ -161,11 +162,81 @@ function Test-Prerequisites {
 }
 #endregion
 
-#region ── 2. FRIENDLY REGION NAMES ──────────────────────────────────────────────
-$RegionDisplayNames = @{
-    'canadacentral' = 'Canada Central'
-    'canadaeast'    = 'Canada East'
+#region ── 2. REGION RESOLUTION ──────────────────────────────────────────────────
+function Resolve-Regions {
+    <#
+    .SYNOPSIS
+        Resolves the target regions. If none specified, discovers all regions that
+        contain resources in the target subscriptions. Builds a display-name lookup.
+    #>
+    [CmdletBinding()]
+    param(
+        [string[]]$RequestedRegions
+    )
+
+    Write-Host "`n── Resolving target regions ──" -ForegroundColor Cyan
+
+    # Build a full Azure location lookup (internal name → display name)
+    $allLocations = Get-AzLocation -ErrorAction SilentlyContinue
+    $script:RegionDisplayNames = @{}
+    foreach ($loc in $allLocations) {
+        $script:RegionDisplayNames[$loc.Location] = $loc.DisplayName
+    }
+
+    if ($RequestedRegions -and $RequestedRegions.Count -gt 0) {
+        # User specified explicit regions
+        $resolved = $RequestedRegions | ForEach-Object { $_.ToLower() }
+        Write-Host "[  OK  ] Using $($resolved.Count) specified region(s):" -ForegroundColor Green
+        foreach ($r in $resolved) {
+            $display = if ($script:RegionDisplayNames[$r]) { $script:RegionDisplayNames[$r] } else { $r }
+            Write-Host "         • $display ($r)" -ForegroundColor Gray
+        }
+        return $resolved
+    }
+
+    # Default: discover all regions that have relevant resources
+    Write-Host "[INFO ] No regions specified — discovering regions with resources..." -ForegroundColor Yellow
+    $query = @"
+Resources
+| where type in~ (
+    'microsoft.compute/virtualmachines',
+    'microsoft.compute/virtualmachinescalesets',
+    'microsoft.sql/servers/databases',
+    'microsoft.sql/servers',
+    'microsoft.sql/managedinstances',
+    'microsoft.web/sites',
+    'microsoft.web/serverfarms',
+    'microsoft.storage/storageaccounts'
+  )
+| distinct location
+| order by location asc
+"@
+
+    try {
+        $regionResults = Search-AzGraph -Query $query -First 1000 -Subscription $script:ResolvedSubscriptionIds -ErrorAction Stop
+        $resolved = $regionResults | ForEach-Object { $_.location.ToLower() }
+
+        if ($resolved.Count -eq 0) {
+            Write-Host "[WARN ] No resources found in any region. Falling back to all Azure regions." -ForegroundColor Yellow
+            $resolved = $allLocations | Where-Object { $_.RegionType -eq 'Physical' } | ForEach-Object { $_.Location }
+        }
+
+        Write-Host "[  OK  ] Found resources in $($resolved.Count) region(s):" -ForegroundColor Green
+        foreach ($r in $resolved) {
+            $display = if ($script:RegionDisplayNames[$r]) { $script:RegionDisplayNames[$r] } else { $r }
+            Write-Host "         • $display" -ForegroundColor Gray
+        }
+        return $resolved
+    } catch {
+        Write-Host "[WARN ] Region discovery failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "[INFO ] Falling back to all physical Azure regions." -ForegroundColor Yellow
+        $resolved = $allLocations | Where-Object { $_.RegionType -eq 'Physical' } | ForEach-Object { $_.Location }
+        return $resolved
+    }
 }
+
+# Initialize as empty — will be populated by Resolve-Regions
+$script:RegionDisplayNames = @{}
 #endregion
 
 #region ── 3. DATA COLLECTION FUNCTIONS ──────────────────────────────────────────
@@ -337,7 +408,7 @@ Resources
         $resources = Search-AzGraph -Query $query -First 1000 -Subscription $script:ResolvedSubscriptionIds -ErrorAction Stop
         Write-Host "[  OK  ] Found $($resources.Count) resources across target regions" -ForegroundColor Green
         foreach ($region in $TargetRegions) {
-            $displayName = $RegionDisplayNames[$region]
+            $displayName = if ($RegionDisplayNames[$region]) { $RegionDisplayNames[$region] } else { $region }
             $count = ($resources | Where-Object { $_.location -eq $region }).Count
             Write-Host "         $displayName : $count resources" -ForegroundColor Gray
         }
@@ -480,7 +551,7 @@ function Build-SLAMatrix {
     $slaRows = @()
 
     foreach ($region in $TargetRegions) {
-        $regionDisplay = $RegionDisplayNames[$region]
+        $regionDisplay = if ($RegionDisplayNames[$region]) { $RegionDisplayNames[$region] } else { $region }
 
         foreach ($category in $serviceCategories) {
             $row = [ordered]@{
@@ -588,7 +659,7 @@ function Calculate-MonthlyAvailability {
             $regionMatch = $false
             foreach ($ir in $impactedRegions) {
                 $irName = if ($ir.ImpactedRegion) { $ir.ImpactedRegion } else { $ir }
-                if ($irName -like "*$($RegionDisplayNames[$Region])*" -or $irName -eq $Region) {
+                if ($irName -like "*$(if ($RegionDisplayNames[$Region]) { $RegionDisplayNames[$Region] } else { $Region })*" -or $irName -eq $Region) {
                     $regionMatch = $true
                     break
                 }
@@ -669,7 +740,7 @@ function Build-IncidentsTable {
             $regionRelevant = $true  # No region info, include for safety
         } else {
             foreach ($region in $TargetRegions) {
-                $displayName = $RegionDisplayNames[$region]
+                $displayName = if ($RegionDisplayNames[$region]) { $RegionDisplayNames[$region] } else { $region }
                 foreach ($ra in $regionsAffected) {
                     if ($ra -like "*$displayName*" -or $ra -eq $region) {
                         $regionRelevant = $true
@@ -748,11 +819,21 @@ function Export-SLAReport {
     # ══════════════════════════════════════════════════════════════════════
     # TAB 1: SLA Overview
     # ══════════════════════════════════════════════════════════════════════
+    # Build a dynamic title showing the regions covered
+    $regionDisplayList = ($Regions | ForEach-Object {
+        if ($script:RegionDisplayNames[$_]) { $script:RegionDisplayNames[$_] } else { $_ }
+    })
+    if ($regionDisplayList.Count -le 5) {
+        $titleRegions = $regionDisplayList -join ', '
+    } else {
+        $titleRegions = "$($regionDisplayList.Count) regions"
+    }
+
     $tab1Name = "SLA Overview"
 
     $excelPkg = $SLAMatrix | Export-Excel -Path $OutputFile -WorksheetName $tab1Name `
         -AutoSize -AutoFilter -FreezeTopRow -BoldTopRow `
-        -Title "Azure SLA Report — Canada Central & Canada East" `
+        -Title "Azure SLA Report — $titleRegions" `
         -TitleBold -TitleSize 14 `
         -PassThru
 
@@ -895,16 +976,19 @@ try {
     # Step 1: Prerequisites & connection
     $context = Test-Prerequisites
 
-    # Step 2: Define date ranges
+    # Step 2: Resolve regions
+    $Regions = Resolve-Regions -RequestedRegions $Regions
+
+    # Step 3: Define date ranges
     $now          = Get-Date
     $startDate12m = (Get-Date -Year $now.Year -Month $now.Month -Day 1).AddMonths(-($MonthsBack - 1))
     $endDate      = $now
     $startDate1m  = $now.AddMonths(-1)
 
     Write-Host "`n── Date ranges ──" -ForegroundColor Cyan
-    Write-Host " SLA period : $($startDate12m.ToString('yyyy-MM-dd')) to $($endDate.ToString('yyyy-MM-dd')) ($MonthsBack months)" -ForegroundColor Gray
+    Write-Host "  SLA period : $($startDate12m.ToString('yyyy-MM-dd')) to $($endDate.ToString('yyyy-MM-dd')) ($MonthsBack months)" -ForegroundColor Gray
     Write-Host "  Incidents  : $($startDate1m.ToString('yyyy-MM-dd')) to $($endDate.ToString('yyyy-MM-dd')) (past month)" -ForegroundColor Gray
-    Write-Host "  Regions    : $($Regions -join ', ')" -ForegroundColor Gray
+    Write-Host "  Regions    : $($Regions.Count) region(s)" -ForegroundColor Gray
     Write-Host "  Subscriptions: $($script:ResolvedSubscriptionIds.Count) subscription(s)`n" -ForegroundColor Gray
 
     # Step 3: Collect data
