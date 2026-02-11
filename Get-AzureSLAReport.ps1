@@ -35,6 +35,16 @@ param(
     [string[]]$SubscriptionIds = @()
 )
 
+# ── Resolve OutputPath: if it's a directory, append the default filename ────
+$defaultFileName = "AzureSLA_Report_$(Get-Date -Format 'yyyyMMdd_HHmmss').xlsx"
+if ($OutputPath -and (Test-Path $OutputPath -PathType Container)) {
+    $OutputPath = Join-Path $OutputPath $defaultFileName
+} elseif ($OutputPath -and (-not [System.IO.Path]::HasExtension($OutputPath))) {
+    # Path doesn't exist yet but has no extension — treat as directory
+    $null = New-Item -Path $OutputPath -ItemType Directory -Force -ErrorAction SilentlyContinue
+    $OutputPath = Join-Path $OutputPath $defaultFileName
+}
+
 #region ── 0. HELPER: COLOUR / STYLE CONSTANTS ──────────────────────────────────
 $HeaderBg       = [System.Drawing.Color]::FromArgb(0, 120, 215)   # Azure blue
 $HeaderFg       = [System.Drawing.Color]::White
