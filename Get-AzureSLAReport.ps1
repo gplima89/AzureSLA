@@ -795,6 +795,95 @@ function Build-IncidentsTable {
     Write-Host "[  OK  ] Incidents table: $($rows.Count) entries for target regions" -ForegroundColor Green
     return $rows
 }
+
+function Build-ServiceHealthTimeline {
+    <#
+    .SYNOPSIS
+        Builds a month-by-month timeline of all service health events
+        over the full reporting period (12 months by default).
+    #>
+    [CmdletBinding()]
+    param(
+        [array]$Incidents,
+        [string[]]$TargetRegions,
+        [datetime]$StartDate,
+        [datetime]$EndDate
+    )
+
+    Write-Host "`n── Building service health timeline ──" -ForegroundColor Cyan
+
+    $rows = @()
+
+    foreach ($inc in $Incidents) {
+        if ($null -eq $inc.impactStartTime) { continue }
+
+        $incStart = [datetime]$inc.impactStartTime
+
+        # Extract affected regions and services from the incident
+        $regionsAffected  = @()
+        $servicesAffected = @()
+
+        if ($null -ne $inc.impactedServices) {
+            $impactArray = if ($inc.impactedServices -is [array]) { $inc.impactedServices } else { @($inc.impactedServices) }
+            foreach ($impact in $impactArray) {
+                $svcName = if ($impact.ImpactedService) { $impact.ImpactedService } else { $impact.ServiceName }
+                if ($svcName) { $servicesAffected += $svcName }
+
+                $impRegions = if ($impact.ImpactedRegions) { $impact.ImpactedRegions } else { @() }
+                foreach ($ir in $impRegions) {
+                    $rName = if ($ir.ImpactedRegion) { $ir.ImpactedRegion } else { $ir }
+                    if ($rName) { $regionsAffected += $rName }
+                }
+            }
+        }
+
+        # Filter to target regions
+        $regionRelevant = $false
+        if ($regionsAffected.Count -eq 0) {
+            $regionRelevant = $true
+        } else {
+            foreach ($region in $TargetRegions) {
+                $displayName = if ($RegionDisplayNames[$region]) { $RegionDisplayNames[$region] } else { $region }
+                foreach ($ra in $regionsAffected) {
+                    if ($ra -like "*$displayName*" -or $ra -eq $region) {
+                        $regionRelevant = $true
+                        break
+                    }
+                }
+                if ($regionRelevant) { break }
+            }
+        }
+        if (-not $regionRelevant) { continue }
+
+        # Calculate duration
+        $incEnd = if ($inc.impactEndTime) { [datetime]$inc.impactEndTime } else { $null }
+        $durationHours = if ($incStart -and $incEnd) {
+            [Math]::Round(($incEnd - $incStart).TotalHours, 2)
+        } else { "Ongoing" }
+
+        $rows += [PSCustomObject][ordered]@{
+            'Month'              = $incStart.ToString("yyyy-MM")
+            'Month Name'         = $incStart.ToString("MMM yyyy")
+            'Event Type'         = $inc.eventType
+            'Status'             = $inc.status
+            'Title'              = $inc.title
+            'Impact Start (UTC)' = $incStart.ToString("yyyy-MM-dd HH:mm")
+            'Impact End (UTC)'   = if ($incEnd) { $incEnd.ToString("yyyy-MM-dd HH:mm") } else { "Ongoing" }
+            'Duration (Hours)'   = $durationHours
+            'Level'              = $inc.level
+            'Affected Services'  = ($servicesAffected | Select-Object -Unique) -join '; '
+            'Affected Regions'   = ($regionsAffected | Select-Object -Unique) -join '; '
+            'Summary'            = if ($inc.summary) { ($inc.summary -replace '<[^>]+>', '').Substring(0, [Math]::Min(500, ($inc.summary -replace '<[^>]+>', '').Length)) } else { "" }
+            'Tracking ID'        = $inc.name
+        }
+    }
+
+    # Sort by month descending, then by start time descending
+    $rows = $rows | Sort-Object { $_.'Month' }, { $_.'Impact Start (UTC)' } -Descending
+
+    Write-Host "[  OK  ] Service health timeline: $($rows.Count) events across reporting period" -ForegroundColor Green
+    return $rows
+}
 #endregion
 
 #region ── 5. EXCEL EXPORT ───────────────────────────────────────────────────────
@@ -802,12 +891,14 @@ function Build-IncidentsTable {
 function Export-SLAReport {
     <#
     .SYNOPSIS
-        Exports the SLA matrix and incidents table to a formatted Excel workbook.
+        Exports the SLA matrix, incidents table, and service health timeline
+        to a formatted Excel workbook.
     #>
     [CmdletBinding()]
     param(
         [array]$SLAMatrix,
         [array]$IncidentsTable,
+        [array]$HealthTimeline,
         [string]$OutputFile
     )
 
@@ -962,6 +1053,76 @@ function Export-SLAReport {
             -AutoSize -PassThru
     }
 
+    # ══════════════════════════════════════════════════════════════════════
+    # TAB 3: Service Health Timeline (month by month)
+    # ══════════════════════════════════════════════════════════════════════
+    $tab3Name = "Health Timeline"
+
+    if ($HealthTimeline -and $HealthTimeline.Count -gt 0) {
+        $excelPkg = $HealthTimeline | Export-Excel -ExcelPackage $excelPkg -WorksheetName $tab3Name `
+            -AutoSize -AutoFilter -FreezeTopRow -BoldTopRow `
+            -Title "Service Health Events — Month by Month ($MonthsBack months)" `
+            -TitleBold -TitleSize 14 `
+            -PassThru
+
+        $ws3 = $excelPkg.Workbook.Worksheets[$tab3Name]
+        $headerRow3 = 2
+        $lastCol3 = $ws3.Dimension.End.Column
+        $lastRow3 = $ws3.Dimension.End.Row
+
+        # Style header row
+        for ($col = 1; $col -le $lastCol3; $col++) {
+            $cell = $ws3.Cells[$headerRow3, $col]
+            $cell.Style.Fill.PatternType = [OfficeOpenXml.Style.ExcelFillStyle]::Solid
+            $cell.Style.Fill.BackgroundColor.SetColor($HeaderBg)
+            $cell.Style.Font.Color.SetColor($HeaderFg)
+            $cell.Style.Font.Bold = $true
+        }
+
+        # Set column widths
+        $ws3.Column(1).Width  = 12  # Month
+        $ws3.Column(2).Width  = 14  # Month Name
+        $ws3.Column(3).Width  = 16  # Event Type
+        $ws3.Column(4).Width  = 14  # Status
+        $ws3.Column(5).Width  = 50  # Title
+        $ws3.Column(6).Width  = 18  # Impact Start
+        $ws3.Column(7).Width  = 18  # Impact End
+        $ws3.Column(8).Width  = 16  # Duration
+        $ws3.Column(9).Width  = 12  # Level
+        $ws3.Column(10).Width = 30  # Affected Services
+        $ws3.Column(11).Width = 30  # Affected Regions
+        $ws3.Column(12).Width = 60  # Summary
+        $ws3.Column(13).Width = 36  # Tracking ID
+
+        # Alternating row shading by month for visual grouping
+        $currentMonth = ""
+        $monthShadeToggle = $false
+        $monthShadeBg = [System.Drawing.Color]::FromArgb(230, 240, 250)  # light blue
+        for ($row = $headerRow3 + 1; $row -le $lastRow3; $row++) {
+            $monthVal = $ws3.Cells[$row, 1].Value
+            if ($monthVal -ne $currentMonth) {
+                $currentMonth = $monthVal
+                $monthShadeToggle = -not $monthShadeToggle
+            }
+            if ($monthShadeToggle) {
+                for ($col = 1; $col -le $lastCol3; $col++) {
+                    $c = $ws3.Cells[$row, $col]
+                    if ($c.Style.Fill.PatternType -ne [OfficeOpenXml.Style.ExcelFillStyle]::Solid) {
+                        $c.Style.Fill.PatternType = [OfficeOpenXml.Style.ExcelFillStyle]::Solid
+                        $c.Style.Fill.BackgroundColor.SetColor($monthShadeBg)
+                    }
+                }
+            }
+            # Wrap summary text
+            $ws3.Cells[$row, 12].Style.WrapText = $true
+            $ws3.Row($row).Height = 40
+        }
+    } else {
+        $emptyData3 = @([PSCustomObject]@{ Message = "No service health events found for the target regions in the reporting period." })
+        $excelPkg = $emptyData3 | Export-Excel -ExcelPackage $excelPkg -WorksheetName $tab3Name `
+            -AutoSize -PassThru
+    }
+
     # Save and close
     Close-ExcelPackage $excelPkg
     Write-Host "[  OK  ] Report saved to: $OutputFile" -ForegroundColor Green
@@ -1015,8 +1176,15 @@ try {
         -Alerts $alerts1m `
         -TargetRegions $Regions
 
+    $healthTimeline = Build-ServiceHealthTimeline `
+        -Incidents ($incidents12m + $healthEvents) `
+        -TargetRegions $Regions `
+        -StartDate $startDate12m `
+        -EndDate $endDate
+
     # Step 5: Export to Excel
-    Export-SLAReport -SLAMatrix $slaMatrix -IncidentsTable $incidentsTable -OutputFile $OutputPath
+    Export-SLAReport -SLAMatrix $slaMatrix -IncidentsTable $incidentsTable `
+        -HealthTimeline $healthTimeline -OutputFile $OutputPath
 
     $stopwatch.Stop()
 
