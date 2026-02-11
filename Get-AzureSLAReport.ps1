@@ -213,7 +213,7 @@ Resources
 "@
 
     try {
-        $regionResults = Search-AzGraph -Query $query -First 1000 -Subscription $script:ResolvedSubscriptionIds -ErrorAction Stop
+        $regionResults = Invoke-PaginatedGraphQuery -Query $query -Label 'region records'
         $resolved = $regionResults | ForEach-Object { $_.location.ToLower() }
 
         if ($resolved.Count -eq 0) {
@@ -257,6 +257,87 @@ function Convert-TicksToDateTime {
     }
 }
 
+function Invoke-PaginatedGraphQuery {
+    <#
+    .SYNOPSIS
+        Executes an Azure Resource Graph query with automatic pagination.
+        First runs a count query to log the total, then fetches all rows in
+        batches of 1000 using -First / -Skip (up to 5 000) and $SkipToken
+        (beyond 5 000).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Query,
+        [string]$Label = 'records',
+        [int]$BatchSize = 1000
+    )
+
+    # ── 1. Count query ──────────────────────────────────────────────────
+    $countQuery = @"
+$Query
+| count
+"@
+    try {
+        $countResult = Search-AzGraph -Query $countQuery -First 1 `
+            -Subscription $script:ResolvedSubscriptionIds -ErrorAction Stop
+        $totalCount = [int]($countResult | Select-Object -ExpandProperty Count_ -ErrorAction SilentlyContinue)
+        if (-not $totalCount) { $totalCount = [int]($countResult.Count_) }
+        Write-Host "[INFO ] Total $Label to retrieve: $totalCount" -ForegroundColor Cyan
+    } catch {
+        Write-Host "[WARN ] Count query failed — will paginate until exhausted." -ForegroundColor Yellow
+        $totalCount = -1        # unknown; keep paging until empty
+    }
+
+    # ── 2. Paginated fetch ──────────────────────────────────────────────
+    $allResults  = [System.Collections.Generic.List[object]]::new()
+    $skip        = 0
+    $skipToken   = $null
+    $batchNum    = 0
+
+    while ($true) {
+        $batchNum++
+        $params = @{
+            Query        = $Query
+            First        = $BatchSize
+            Subscription = $script:ResolvedSubscriptionIds
+            ErrorAction  = 'Stop'
+        }
+
+        if ($skipToken) {
+            $params['SkipToken'] = $skipToken
+        } elseif ($skip -gt 0) {
+            $params['Skip'] = $skip
+        }
+
+        try {
+            $batch = Search-AzGraph @params
+        } catch {
+            Write-Host "[WARN ] Batch $batchNum failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            break
+        }
+
+        if (-not $batch -or $batch.Count -eq 0) { break }
+
+        $allResults.AddRange(@($batch))
+        Write-Host "[INFO ] Batch $batchNum — fetched $($batch.Count) $Label (total so far: $($allResults.Count))" -ForegroundColor Gray
+
+        # Determine next page strategy
+        if ($batch.SkipToken) {
+            $skipToken = $batch.SkipToken
+        } else {
+            $skipToken = $null
+            $skip += $batch.Count
+        }
+
+        # Stop when we've collected everything
+        if ($totalCount -ge 0 -and $allResults.Count -ge $totalCount) { break }
+        if ($batch.Count -lt $BatchSize) { break }
+    }
+
+    Write-Host "[  OK  ] Retrieved $($allResults.Count) $Label (paginated)" -ForegroundColor Green
+    return , $allResults.ToArray()
+}
+
 function Get-ResourceHealthEvents {
     <#
     .SYNOPSIS
@@ -286,7 +367,7 @@ servicehealthresources
 "@
 
     try {
-        $raw = Search-AzGraph -Query $query -First 1000 -Subscription $script:ResolvedSubscriptionIds -ErrorAction Stop
+        $raw = Invoke-PaginatedGraphQuery -Query $query -Label 'health events'
 
         # Convert ticks → DateTime and filter by date range in PowerShell
         $results = foreach ($r in $raw) {
@@ -429,7 +510,7 @@ Resources
 "@
 
     try {
-        $resources = Search-AzGraph -Query $query -First 1000 -Subscription $script:ResolvedSubscriptionIds -ErrorAction Stop
+        $resources = Invoke-PaginatedGraphQuery -Query $query -Label 'resources'
         Write-Host "[  OK  ] Found $($resources.Count) resources across target regions" -ForegroundColor Green
         foreach ($region in $TargetRegions) {
             $displayName = if ($RegionDisplayNames[$region]) { $RegionDisplayNames[$region] } else { $region }
@@ -497,7 +578,7 @@ HealthResources
 "@
 
     try {
-        $healthData = Search-AzGraph -Query $query -First 1000 -Subscription $script:ResolvedSubscriptionIds -ErrorAction Stop
+        $healthData = Invoke-PaginatedGraphQuery -Query $query -Label 'availability records'
         Write-Host "[  OK  ] Retrieved $($healthData.Count) availability records" -ForegroundColor Green
         return $healthData
     } catch {
@@ -536,7 +617,7 @@ servicehealthresources
 "@
 
     try {
-        $raw = Search-AzGraph -Query $query -First 1000 -Subscription $script:ResolvedSubscriptionIds -ErrorAction Stop
+        $raw = Invoke-PaginatedGraphQuery -Query $query -Label 'service health incidents'
 
         # Convert ticks → DateTime and filter by date range in PowerShell
         $incidents = foreach ($r in $raw) {

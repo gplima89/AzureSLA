@@ -2,6 +2,13 @@
 
 All notable changes to the Azure SLA & Service Health Report Generator are documented in this file.
 
+## [1.3.0] — 2026-02-11
+
+### Added
+
+- **Paginated Resource Graph queries** — New `Invoke-PaginatedGraphQuery` helper function fetches results in batches of 1 000, supporting environments with 250 000+ resources. Uses `-Skip` for the first 5 000 rows and `$SkipToken` beyond that. A count query runs first to log the total before fetching begins.
+- All five `Search-AzGraph` call sites (`Resolve-Regions`, `Get-ResourceHealthEvents`, `Get-ResourceInventory`, `Get-ResourceAvailability`, `Get-ServiceHealthIncidents`) now route through the paginated helper.
+
 ## [1.2.0] — 2026-02-11
 
 ### Fixed
