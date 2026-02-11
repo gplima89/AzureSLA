@@ -4,6 +4,19 @@ Automated PowerShell script that generates an Excel report tracking Azure servic
 
 > **Note:** This report summarizes **observed availability and incidents** for your resources using Resource Health / Service Health signals. It does not replace [Microsoft's official Service Level Agreements](https://www.microsoft.com/licensing/docs/view/Service-Level-Agreements-SLA-for-Online-Services).
 
+## What this report represents
+
+✅ This report provides **observed service availability and health signals**
+based on Azure Resource Health, Service Health, and Activity Logs.
+
+❌ This report does **not** replace Microsoft's official contractual SLA documents.
+Official SLAs are defined in the [Service Level Agreements for Online Services](https://www.microsoft.com/licensing/docs/view/Service-Level-Agreements-SLA-for-Online-Services).
+
+This tool is intended to help customers:
+- Track historical availability trends
+- Identify impacted regions and services
+- Support operational reviews and governance reporting
+
 ## Quick Start
 
 ```powershell
