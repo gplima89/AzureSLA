@@ -12,7 +12,7 @@ This tool queries Azure Resource Health, Service Health, and Activity Log APIs t
 |-----|---------|
 | **SLA Overview** | Resource availability % aggregated by region, service category, and month for the past 12 months |
 | **Incidents & Alerts** | Service Health incidents and Activity Log alerts from the past month affecting your environment |
-
+> **Multi-subscription**: By default the script queries **all enabled subscriptions** your account has access to. Use `-SubscriptionIds` to narrow the scope to specific subscriptions.
 ### Service Categories Tracked
 
 | Category | Azure Resource Types |
@@ -56,8 +56,9 @@ Install-Module ImportExcel -Scope CurrentUser -Force
 
 ### Azure Permissions
 
-- **Minimum role**: `Reader` on the target subscription
+- **Minimum role**: `Reader` on the target subscription(s)
 - The `Microsoft.ResourceHealth` provider must be registered (the script will attempt auto-registration)
+- For multi-subscription, the account must have Reader on each subscription to be queried
 
 ---
 
@@ -78,6 +79,7 @@ Connect-AzAccount
 ```
 
 This will:
+- Query **all subscriptions** your account can access
 - Check **Canada Central** and **Canada East**
 - Cover the past **12 months** for SLA data
 - Cover the past **1 month** for incidents
@@ -91,6 +93,13 @@ This will:
     -Regions @("canadacentral", "canadaeast") `
     -MonthsBack 6 `
     -OutputPath "C:\Reports\MySLAReport.xlsx"
+
+# Run for specific subscriptions only
+.\Get-AzureSLAReport.ps1 `
+    -SubscriptionIds @("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "11111111-2222-3333-4444-555555555555")
+
+# Run for a single subscription
+.\Get-AzureSLAReport.ps1 -SubscriptionIds @("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
 ```
 
 ### Parameters
@@ -100,6 +109,7 @@ This will:
 | `-Regions` | `string[]` | `@("canadacentral", "canadaeast")` | Azure region identifiers to include |
 | `-MonthsBack` | `int` | `12` | Number of months of historical SLA data |
 | `-OutputPath` | `string` | `.\AzureSLA_Report_<timestamp>.xlsx` | Full path for the output Excel file |
+| `-SubscriptionIds` | `string[]` | `@()` (all subscriptions) | Specific subscription IDs to query. Leave empty to query ALL enabled subscriptions |
 
 ---
 

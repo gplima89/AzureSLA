@@ -14,17 +14,24 @@
       - ImportExcel module
       - An active Azure subscription with Reader access
 
+    Subscription scope:
+      - By default, queries ALL subscriptions accessible to the authenticated account.
+      - Use -SubscriptionIds to limit to specific subscriptions.
+
 .NOTES
     Author  : Guil Lima (Microsoft)
     Date    : 2026-02-11
-    Version : 1.0
+    Version : 1.1
 #>
 
 [CmdletBinding()]
 param(
     [string[]]$Regions = @("canadacentral", "canadaeast"),
     [int]$MonthsBack = 12,
-    [string]$OutputPath = (Join-Path $PSScriptRoot "AzureSLA_Report_$(Get-Date -Format 'yyyyMMdd_HHmmss').xlsx")
+    [string]$OutputPath = (Join-Path $PSScriptRoot "AzureSLA_Report_$(Get-Date -Format 'yyyyMMdd_HHmmss').xlsx"),
+
+    # Subscription scope: pass one or more subscription IDs, or leave empty for ALL subscriptions
+    [string[]]$SubscriptionIds = @()
 )
 
 #region ── 0. HELPER: COLOUR / STYLE CONSTANTS ──────────────────────────────────
@@ -105,18 +112,41 @@ function Test-Prerequisites {
     }
 
     Write-Host "[  OK  ] Connected as: $($ctx.Account.Id)" -ForegroundColor Green
-    Write-Host "[  OK  ] Subscription: $($ctx.Subscription.Name) ($($ctx.Subscription.Id))" -ForegroundColor Green
+    Write-Host "[  OK  ] Default subscription: $($ctx.Subscription.Name) ($($ctx.Subscription.Id))" -ForegroundColor Green
 
-    # ── Validate subscription access ────────────────────────────────────────
-    try {
-        $sub = Get-AzSubscription -SubscriptionId $ctx.Subscription.Id -ErrorAction Stop
-        Write-Host "[  OK  ] Subscription state: $($sub.State)" -ForegroundColor Green
-    } catch {
-        Write-Host "[ERROR] Cannot access subscription. Ensure you have at least Reader role." -ForegroundColor Red
-        throw "Subscription access validation failed."
+    # ── Resolve subscription scope ─────────────────────────────────────────
+    Write-Host "`n── Resolving subscription scope ──" -ForegroundColor Cyan
+    if ($SubscriptionIds -and $SubscriptionIds.Count -gt 0) {
+        # User specified explicit subscription IDs
+        $targetSubs = @()
+        foreach ($sid in $SubscriptionIds) {
+            try {
+                $s = Get-AzSubscription -SubscriptionId $sid -ErrorAction Stop
+                $targetSubs += $s
+                Write-Host "[  OK  ] $($s.Name) ($($s.Id)) — $($s.State)" -ForegroundColor Green
+            } catch {
+                Write-Host "[WARN ] Subscription '$sid' not accessible — skipping" -ForegroundColor Yellow
+            }
+        }
+        if ($targetSubs.Count -eq 0) {
+            throw "None of the specified subscriptions are accessible."
+        }
+    } else {
+        # Default: ALL subscriptions the account can access
+        $targetSubs = Get-AzSubscription -ErrorAction Stop | Where-Object { $_.State -eq 'Enabled' }
+        if ($targetSubs.Count -eq 0) {
+            throw "No enabled subscriptions found for this account."
+        }
+        Write-Host "[  OK  ] Found $($targetSubs.Count) enabled subscription(s):" -ForegroundColor Green
+        foreach ($s in $targetSubs) {
+            Write-Host "         • $($s.Name) ($($s.Id))" -ForegroundColor Gray
+        }
     }
 
-    # ── Verify Resource Graph provider ──────────────────────────────────────
+    # Store resolved subscription IDs in script scope for other functions
+    $script:ResolvedSubscriptionIds = $targetSubs | ForEach-Object { $_.Id }
+
+    # ── Verify Resource Graph provider (on current context subscription) ──
     $rgProvider = Get-AzResourceProvider -ProviderNamespace 'Microsoft.ResourceHealth' -ErrorAction SilentlyContinue
     if (-not $rgProvider -or $rgProvider[0].RegistrationState -ne 'Registered') {
         Write-Host "[WARN ] Microsoft.ResourceHealth provider not registered. Attempting registration..." -ForegroundColor Yellow
@@ -173,7 +203,7 @@ ServiceHealthResources
 "@
 
     try {
-        $results = Search-AzGraph -Query $query -First 1000 -ErrorAction Stop
+        $results = Search-AzGraph -Query $query -First 1000 -Subscription $script:ResolvedSubscriptionIds -ErrorAction Stop
         Write-Host "[  OK  ] Retrieved $($results.Count) service health events" -ForegroundColor Green
         return $results
     } catch {
@@ -198,46 +228,61 @@ function Get-ServiceHealthAlerts {
 
     $alerts = @()
     try {
-        # Get Service Health events from Activity Log
-        $logs = Get-AzActivityLog -StartTime $StartDate -EndTime $EndDate `
-            -ResourceProvider "Microsoft.ResourceHealth" -MaxRecord 1000 -ErrorAction SilentlyContinue
+        # Save current context to restore later
+        $originalContext = Get-AzContext
 
-        if ($logs) {
-            foreach ($log in $logs) {
-                $alerts += [PSCustomObject]@{
-                    Timestamp       = $log.EventTimestamp
-                    Category        = $log.Category.Value
-                    Level           = $log.Level
-                    OperationName   = $log.OperationName.Value
-                    Status          = $log.Status.Value
-                    Description     = $log.Description
-                    ResourceId      = $log.ResourceId
-                    CorrelationId   = $log.CorrelationId
+        foreach ($subId in $script:ResolvedSubscriptionIds) {
+            # Switch context to each subscription for Activity Log queries
+            Set-AzContext -SubscriptionId $subId -ErrorAction SilentlyContinue | Out-Null
+            $subName = (Get-AzContext).Subscription.Name
+            Write-Host "  Scanning subscription: $subName" -ForegroundColor Gray
+
+            # Get Resource Health events from Activity Log
+            $logs = Get-AzActivityLog -StartTime $StartDate -EndTime $EndDate `
+                -ResourceProvider "Microsoft.ResourceHealth" -MaxRecord 1000 -ErrorAction SilentlyContinue
+
+            if ($logs) {
+                foreach ($log in $logs) {
+                    $alerts += [PSCustomObject]@{
+                        Timestamp       = $log.EventTimestamp
+                        Category        = $log.Category.Value
+                        Level           = $log.Level
+                        OperationName   = $log.OperationName.Value
+                        Status          = $log.Status.Value
+                        Description     = $log.Description
+                        ResourceId      = $log.ResourceId
+                        CorrelationId   = $log.CorrelationId
+                        Subscription    = $subName
+                    }
+                }
+            }
+
+            # Also get ServiceHealth category events
+            $shLogs = Get-AzActivityLog -StartTime $StartDate -EndTime $EndDate `
+                -MaxRecord 1000 -ErrorAction SilentlyContinue |
+                Where-Object { $_.Category.Value -eq 'ServiceHealth' }
+
+            if ($shLogs) {
+                foreach ($log in $shLogs) {
+                    $alerts += [PSCustomObject]@{
+                        Timestamp       = $log.EventTimestamp
+                        Category        = 'ServiceHealth'
+                        Level           = $log.Level
+                        OperationName   = $log.OperationName.Value
+                        Status          = $log.Status.Value
+                        Description     = $log.Description
+                        ResourceId      = $log.ResourceId
+                        CorrelationId   = $log.CorrelationId
+                        Subscription    = $subName
+                    }
                 }
             }
         }
 
-        # Also get ServiceHealth category events
-        $shLogs = Get-AzActivityLog -StartTime $StartDate -EndTime $EndDate `
-            -MaxRecord 1000 -ErrorAction SilentlyContinue |
-            Where-Object { $_.Category.Value -eq 'ServiceHealth' }
+        # Restore original context
+        Set-AzContext -SubscriptionId $originalContext.Subscription.Id -ErrorAction SilentlyContinue | Out-Null
 
-        if ($shLogs) {
-            foreach ($log in $shLogs) {
-                $alerts += [PSCustomObject]@{
-                    Timestamp       = $log.EventTimestamp
-                    Category        = 'ServiceHealth'
-                    Level           = $log.Level
-                    OperationName   = $log.OperationName.Value
-                    Status          = $log.Status.Value
-                    Description     = $log.Description
-                    ResourceId      = $log.ResourceId
-                    CorrelationId   = $log.CorrelationId
-                }
-            }
-        }
-
-        Write-Host "[  OK  ] Retrieved $($alerts.Count) health alerts from Activity Log" -ForegroundColor Green
+        Write-Host "[  OK  ] Retrieved $($alerts.Count) health alerts from Activity Log across $($script:ResolvedSubscriptionIds.Count) subscription(s)" -ForegroundColor Green
     } catch {
         Write-Host "[WARN ] Activity Log query failed: $($_.Exception.Message)" -ForegroundColor Yellow
     }
@@ -289,7 +334,7 @@ Resources
 "@
 
     try {
-        $resources = Search-AzGraph -Query $query -First 1000 -ErrorAction Stop
+        $resources = Search-AzGraph -Query $query -First 1000 -Subscription $script:ResolvedSubscriptionIds -ErrorAction Stop
         Write-Host "[  OK  ] Found $($resources.Count) resources across target regions" -ForegroundColor Green
         foreach ($region in $TargetRegions) {
             $displayName = $RegionDisplayNames[$region]
@@ -357,7 +402,7 @@ HealthResources
 "@
 
     try {
-        $healthData = Search-AzGraph -Query $query -First 5000 -ErrorAction Stop
+        $healthData = Search-AzGraph -Query $query -First 5000 -Subscription $script:ResolvedSubscriptionIds -ErrorAction Stop
         Write-Host "[  OK  ] Retrieved $($healthData.Count) availability records" -ForegroundColor Green
         return $healthData
     } catch {
@@ -401,7 +446,7 @@ ServiceHealthResources
 "@
 
     try {
-        $incidents = Search-AzGraph -Query $query -First 1000 -ErrorAction Stop
+        $incidents = Search-AzGraph -Query $query -First 1000 -Subscription $script:ResolvedSubscriptionIds -ErrorAction Stop
         Write-Host "[  OK  ] Retrieved $($incidents.Count) service health incidents" -ForegroundColor Green
         return $incidents
     } catch {
@@ -670,6 +715,7 @@ function Build-IncidentsTable {
             'Level'              = $alert.Level
             'Affected Services'  = ""
             'Affected Regions'   = ""
+            'Subscription'       = if ($alert.Subscription) { $alert.Subscription } else { "" }
             'Summary'            = if ($alert.Description) { $alert.Description.Substring(0, [Math]::Min(500, $alert.Description.Length)) } else { "" }
             'Tracking ID'        = $alert.CorrelationId
         }
@@ -856,9 +902,10 @@ try {
     $startDate1m  = $now.AddMonths(-1)
 
     Write-Host "`n── Date ranges ──" -ForegroundColor Cyan
-    Write-Host "  SLA period : $($startDate12m.ToString('yyyy-MM-dd')) to $($endDate.ToString('yyyy-MM-dd')) ($MonthsBack months)" -ForegroundColor Gray
+    Write-Host " SLA period : $($startDate12m.ToString('yyyy-MM-dd')) to $($endDate.ToString('yyyy-MM-dd')) ($MonthsBack months)" -ForegroundColor Gray
     Write-Host "  Incidents  : $($startDate1m.ToString('yyyy-MM-dd')) to $($endDate.ToString('yyyy-MM-dd')) (past month)" -ForegroundColor Gray
-    Write-Host "  Regions    : $($Regions -join ', ')`n" -ForegroundColor Gray
+    Write-Host "  Regions    : $($Regions -join ', ')" -ForegroundColor Gray
+    Write-Host "  Subscriptions: $($script:ResolvedSubscriptionIds.Count) subscription(s)`n" -ForegroundColor Gray
 
     # Step 3: Collect data
     $resources      = Get-ResourceInventory -TargetRegions $Regions
@@ -895,6 +942,7 @@ try {
     Write-Host "╚══════════════════════════════════════════════════╝" -ForegroundColor Green
     Write-Host "  File     : $OutputPath" -ForegroundColor White
     Write-Host "  Duration : $([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1)) seconds" -ForegroundColor White
+    Write-Host "  Subs     : $($script:ResolvedSubscriptionIds.Count) subscription(s)" -ForegroundColor White
     Write-Host "  Resources: $($resources.Count) across $($Regions.Count) regions" -ForegroundColor White
     Write-Host "  Incidents: $($incidentsTable.Count) in past month" -ForegroundColor White
     Write-Host ""
