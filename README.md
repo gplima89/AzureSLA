@@ -1,17 +1,18 @@
 # Azure SLA & Service Health Report Generator
 
-Automated PowerShell script that generates an Excel report tracking Azure service availability (SLA) and health incidents for **Canada Central** and **Canada East** regions.
+Automated PowerShell script that generates an Excel report tracking Azure service availability (SLA) and health incidents across your Azure environment.
 
 ---
 
 ## Overview
 
-This tool queries Azure Resource Health, Service Health, and Activity Log APIs to produce a two-tab Excel workbook:
+This tool queries Azure Resource Health, Service Health, and Activity Log APIs to produce a three-tab Excel workbook:
 
 | Tab | Content |
-|-----|---------|
+|-----|-------|
 | **SLA Overview** | Resource availability % aggregated by region, service category, and month for the past 12 months |
 | **Incidents & Alerts** | Service Health incidents and Activity Log alerts from the past month affecting your environment |
+| **Health Timeline** | All service health events listed month by month over the full reporting period (12 months by default) |
 > **Multi-subscription**: By default the script queries **all enabled subscriptions** your account has access to. Use `-SubscriptionIds` to narrow the scope to specific subscriptions.
 ### Service Categories Tracked
 
@@ -194,6 +195,16 @@ The script includes built-in diagnostics. Common issues:
 | Source | Type | Status | Title | Impact Start | Impact End | Duration | Affected Services | Affected Regions | ... |
 |--------|------|--------|-------|-------------|-----------|----------|-------------------|-----------------|-----|
 | Service Health | ServiceIssue | Resolved | VM connectivity issue | 2026-01-15 08:30 | 2026-01-15 10:45 | 2.25h | Virtual Machines | Canada Central | ... |
+
+### Tab 3 — Health Timeline
+
+Month-by-month breakdown of all service health events over the full reporting period, with alternating row shading per month for visual grouping.
+
+| Month | Month Name | Event Type | Status | Title | Impact Start | Impact End | Duration | Level | Affected Services | Affected Regions | Summary | Tracking ID |
+|-------|-----------|------------|--------|-------|-------------|-----------|----------|-------|-------------------|-----------------|---------|-------------|
+| 2026-02 | Feb 2026 | ServiceIssue | Resolved | Storage latency in Canada | 2026-02-03 14:00 | 2026-02-03 16:30 | 2.50 | Warning | Storage Accounts | Canada Central | Intermittent latency... | XXXX-YYYY |
+| 2026-01 | Jan 2026 | ServiceIssue | Resolved | VM connectivity issue | 2026-01-15 08:30 | 2026-01-15 10:45 | 2.25 | Error | Virtual Machines | Canada Central; Canada East | VMs experienced... | AAAA-BBBB |
+| 2025-12 | Dec 2025 | HealthAdvisory | Active | SQL maintenance window | 2025-12-20 02:00 | 2025-12-20 06:00 | 4.00 | Informational | SQL Database | Canada East | Planned maintenance... | CCCC-DDDD |
 
 ---
 
