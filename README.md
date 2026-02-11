@@ -2,8 +2,6 @@
 
 Automated PowerShell script that generates an Excel report tracking Azure service availability and health incidents across your Azure environment.
 
-> **Note:** This report summarizes **observed availability and incidents** for your resources using Resource Health / Service Health signals. It does not replace [Microsoft's official Service Level Agreements](https://www.microsoft.com/licensing/docs/view/Service-Level-Agreements-SLA-for-Online-Services).
-
 ## What this report represents
 
 ✅ This report provides **observed service availability and health signals**
