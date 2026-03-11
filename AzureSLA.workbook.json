@@ -1,0 +1,439 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 1,
+      "content": {
+        "json": "# Azure SLA\nResource availability, service health incidents, and health timeline — powered by Azure Resource Graph.\n\n> Companion to the PowerShell script **Get-AzureSLAReport.ps1**."
+      },
+      "name": "title"
+    },
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "e5d4706c-d31c-4ec1-be9c-f8c46a248661",
+            "version": "KqlParameterItem/1.0",
+            "name": "Subscriptions",
+            "type": 6,
+            "isRequired": true,
+            "multiSelect": true,
+            "typeSettings": {
+              "additionalResourceOptions": [
+                "value::all"
+              ],
+              "includeAll": true,
+              "showDefault": false
+            },
+            "defaultValue": "value::all"
+          },
+          {
+            "id": "a5ae4111-8472-4cc5-9bb6-b382e6d96a7b",
+            "version": "KqlParameterItem/1.0",
+            "name": "Regions",
+            "type": 2,
+            "isRequired": true,
+            "multiSelect": true,
+            "quote": "'",
+            "delimiter": ",",
+            "query": "Resources\n| where type in~ (\n    'microsoft.compute/virtualmachines',\n    'microsoft.compute/virtualmachinescalesets',\n    'microsoft.sql/servers/databases',\n    'microsoft.sql/servers',\n    'microsoft.sql/managedinstances',\n    'microsoft.web/sites',\n    'microsoft.web/serverfarms',\n    'microsoft.storage/storageaccounts')\n| summarize by location\n| order by location asc",
+            "crossComponentResources": [
+              "{Subscriptions}"
+            ],
+            "typeSettings": {
+              "additionalResourceOptions": [
+                "value::all"
+              ],
+              "includeAll": true,
+              "allValue": "*",
+              "showDefault": false
+            },
+            "defaultValue": "value::all",
+            "queryType": 1,
+            "resourceType": "microsoft.resourcegraph/resources"
+          },
+          {
+            "id": "3a25087c-25c4-441f-973c-d32b0228448e",
+            "version": "KqlParameterItem/1.0",
+            "name": "MonthsBack",
+            "label": "Months Back",
+            "type": 2,
+            "isRequired": true,
+            "query": "{\"version\":\"1.0.0\",\"content\":\"[{\\\"value\\\":\\\"1\\\",\\\"label\\\":\\\"1 Month\\\"},{\\\"value\\\":\\\"2\\\",\\\"label\\\":\\\"2 Months\\\"},{\\\"value\\\":\\\"3\\\",\\\"label\\\":\\\"3 Months\\\"},{\\\"value\\\":\\\"6\\\",\\\"label\\\":\\\"6 Months\\\"},{\\\"value\\\":\\\"12\\\",\\\"label\\\":\\\"12 Months\\\"}]\",\"transformers\":null}",
+            "typeSettings": {
+              "additionalResourceOptions": [],
+              "showDefault": false
+            },
+            "defaultValue": "12",
+            "queryType": 8
+          },
+          {
+            "id": "af0a1a28-e7e8-4bb4-8e85-2e74d4e7ab42",
+            "version": "KqlParameterItem/1.0",
+            "name": "selectedTab",
+            "type": 1,
+            "isHiddenWhenLocked": true,
+            "defaultValue": "overview"
+          }
+        ],
+        "style": "pills",
+        "queryType": 1,
+        "resourceType": "microsoft.resourcegraph/resources"
+      },
+      "name": "parameters"
+    },
+    {
+      "type": 11,
+      "content": {
+        "version": "LinkItem/1.0",
+        "style": "tabs",
+        "links": [
+          {
+            "id": "4a1e5f2c-a1b1-4c3d-9e5f-1a2b3c4d5e6f",
+            "cellValue": "overview",
+            "linkTarget": "parameter",
+            "linkLabel": "SLA Overview",
+            "subTarget": "selectedTab",
+            "style": "link"
+          },
+          {
+            "id": "5b2f6a3d-b2c2-5d4e-af6a-2b3c4d5e6f7a",
+            "cellValue": "incidents",
+            "linkTarget": "parameter",
+            "linkLabel": "Incidents & Alerts",
+            "subTarget": "selectedTab",
+            "style": "link"
+          },
+          {
+            "id": "6c3a7b4e-c3d3-6e5f-ba7b-3c4d5e6f7a8b",
+            "cellValue": "timeline",
+            "linkTarget": "parameter",
+            "linkLabel": "Health Timeline",
+            "subTarget": "selectedTab",
+            "style": "link"
+          }
+        ]
+      },
+      "name": "tabs"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "### Resource Inventory\nTracked resources grouped by region and service category (Compute, SQL DB, Web Apps, Storage)."
+            },
+            "name": "inventoryTitle"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "Resources\n| where '*' in ({Regions}) or location in~ ({Regions})\n| where type in~ (\n    'microsoft.compute/virtualmachines',\n    'microsoft.compute/virtualmachinescalesets',\n    'microsoft.sql/servers/databases',\n    'microsoft.sql/servers',\n    'microsoft.sql/managedinstances',\n    'microsoft.web/sites',\n    'microsoft.web/serverfarms',\n    'microsoft.storage/storageaccounts')\n| extend ServiceCategory = case(\n    type =~ 'microsoft.compute/virtualmachines', 'Compute',\n    type =~ 'microsoft.compute/virtualmachinescalesets', 'Compute',\n    type =~ 'microsoft.sql/servers/databases', 'SQL DB',\n    type =~ 'microsoft.sql/servers', 'SQL DB',\n    type =~ 'microsoft.sql/managedinstances', 'SQL DB',\n    type =~ 'microsoft.web/sites', 'Web Apps',\n    type =~ 'microsoft.web/serverfarms', 'Web Apps',\n    type =~ 'microsoft.storage/storageaccounts', 'Storage',\n    'Other')\n| summarize ['Resource Count'] = count() by Region = location, ['Service Category'] = ServiceCategory\n| order by Region asc, ['Service Category'] asc",
+              "size": 0,
+              "noDataMessage": "No tracked resources found in the selected regions.",
+              "queryType": 1,
+              "resourceType": "microsoft.resourcegraph/resources",
+              "crossComponentResources": [
+                "{Subscriptions}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Resource Count",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "blue"
+                    }
+                  }
+                ]
+              }
+            },
+            "name": "resourceInventory"
+          },
+          {
+            "type": 1,
+            "content": {
+              "json": "### Current Health Availability\nReal-time availability from Azure Resource Health. Matches the service categories tracked by the PowerShell script."
+            },
+            "name": "healthTitle"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "HealthResources\n| where type =~ 'microsoft.resourcehealth/availabilitystatuses'\n| where '*' in ({Regions}) or location in~ ({Regions})\n| extend availabilityState = tostring(properties.availabilityState)\n| extend resourceType = tolower(tostring(properties.targetResourceType))\n| where resourceType in~ (\n    'microsoft.compute/virtualmachines',\n    'microsoft.compute/virtualmachinescalesets',\n    'microsoft.sql/servers/databases',\n    'microsoft.sql/servers',\n    'microsoft.sql/managedinstances',\n    'microsoft.web/sites',\n    'microsoft.web/serverfarms',\n    'microsoft.storage/storageaccounts')\n| extend ServiceCategory = case(\n    resourceType =~ 'microsoft.compute/virtualmachines', 'Compute',\n    resourceType =~ 'microsoft.compute/virtualmachinescalesets', 'Compute',\n    resourceType =~ 'microsoft.sql/servers/databases', 'SQL DB',\n    resourceType =~ 'microsoft.sql/servers', 'SQL DB',\n    resourceType =~ 'microsoft.sql/managedinstances', 'SQL DB',\n    resourceType =~ 'microsoft.web/sites', 'Web Apps',\n    resourceType =~ 'microsoft.web/serverfarms', 'Web Apps',\n    resourceType =~ 'microsoft.storage/storageaccounts', 'Storage',\n    'Other')\n| summarize\n    Available = countif(availabilityState =~ 'Available'),\n    Unavailable = countif(availabilityState =~ 'Unavailable'),\n    Degraded = countif(availabilityState =~ 'Degraded'),\n    Unknown = countif(availabilityState =~ 'Unknown'),\n    Total = count()\n  by Region = location, ['Service Category'] = ServiceCategory\n| extend ['Availability %'] = iff(Total > 0, round(todouble(Available) / todouble(Total) * 100.0, 2), 0.0)\n| order by Region asc, ['Service Category'] asc",
+              "size": 0,
+              "noDataMessage": "No Resource Health data available for the selected regions.",
+              "queryType": 1,
+              "resourceType": "microsoft.resourcegraph/resources",
+              "crossComponentResources": [
+                "{Subscriptions}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Availability %",
+                    "formatter": 18,
+                    "formatOptions": {
+                      "thresholdsOptions": "icons",
+                      "thresholdsGrid": [
+                        {
+                          "operator": ">=",
+                          "thresholdValue": "99.99",
+                          "representation": "success",
+                          "text": "{0}{1}%"
+                        },
+                        {
+                          "operator": ">=",
+                          "thresholdValue": "99.9",
+                          "representation": "2",
+                          "text": "{0}{1}%"
+                        },
+                        {
+                          "operator": ">=",
+                          "thresholdValue": "0",
+                          "representation": "critical",
+                          "text": "{0}{1}%"
+                        },
+                        {
+                          "operator": "Default",
+                          "thresholdValue": null,
+                          "representation": "unknown",
+                          "text": "N/A"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "columnMatch": "Available",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "green"
+                    }
+                  },
+                  {
+                    "columnMatch": "Unavailable",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "red"
+                    }
+                  },
+                  {
+                    "columnMatch": "Degraded",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "yellow"
+                    }
+                  }
+                ]
+              }
+            },
+            "name": "healthAvailability"
+          }
+        ]
+      },
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "overview"
+      },
+      "name": "SLA Overview"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "### Service Health Incidents\nService issues (outages) reported in the selected time range. Columns match the **Incidents & Alerts** tab of the Excel report."
+            },
+            "name": "incidentsTitle"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "servicehealthresources\n| where type =~ 'microsoft.resourcehealth/events'\n| where tostring(properties.EventType) =~ 'ServiceIssue'\n| extend impactStartTicks = tolong(properties.ImpactStartTime)\n| extend impactEndTicks = tolong(properties.ImpactMitigationTime)\n| extend impactStart = iff(isnotnull(impactStartTicks) and impactStartTicks > 0, datetime_add('tick', impactStartTicks, datetime(0001-01-01)), datetime(null))\n| extend impactEnd = iff(isnotnull(impactEndTicks) and impactEndTicks > 0, datetime_add('tick', impactEndTicks, datetime(0001-01-01)), datetime(null))\n| where isnotnull(impactStart)\n| where impactStart >= datetime_add('month', -{MonthsBack}, now())\n| extend Title = tostring(properties.Title)\n| extend Status = tostring(properties.Status)\n| extend Level = tostring(properties.EventLevel)\n| extend Summary = tostring(properties.Summary)\n| mv-expand impact = properties.Impact\n| extend ImpactedService = tostring(impact.ImpactedService)\n| mv-expand impactedRegion = impact.ImpactedRegions\n| extend ImpactedRegionName = tostring(impactedRegion.ImpactedRegion)\n| summarize\n    AffectedServices = make_set(ImpactedService),\n    AffectedRegions = make_set(ImpactedRegionName)\n  by ['Tracking ID'] = name, Title, Status, Level, Summary, impactStart, impactEnd\n| extend DurationMinutes = datetime_diff('minute', impactEnd, impactStart)\n| project\n    ['Tracking ID'],\n    Status,\n    Title,\n    ['Impact Start (UTC)'] = format_datetime(impactStart, 'yyyy-MM-dd HH:mm'),\n    ['Impact End (UTC)'] = iff(isnotnull(impactEnd), format_datetime(impactEnd, 'yyyy-MM-dd HH:mm'), 'Ongoing'),\n    ['Duration (Hours)'] = iff(isnotnull(DurationMinutes), tostring(round(todouble(DurationMinutes) / 60.0, 2)), 'Ongoing'),\n    Level,\n    ['Affected Services'] = strcat_array(AffectedServices, '; '),\n    ['Affected Regions'] = strcat_array(AffectedRegions, '; '),\n    Summary\n| order by ['Impact Start (UTC)'] desc",
+              "size": 0,
+              "noDataMessage": "No service health incidents found for the selected time range and subscriptions.",
+              "queryType": 1,
+              "resourceType": "microsoft.resourcegraph/resources",
+              "crossComponentResources": [
+                "{Subscriptions}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Status",
+                    "formatter": 18,
+                    "formatOptions": {
+                      "thresholdsOptions": "icons",
+                      "thresholdsGrid": [
+                        {
+                          "operator": "==",
+                          "thresholdValue": "Active",
+                          "representation": "warning",
+                          "text": "{0}{1}"
+                        },
+                        {
+                          "operator": "==",
+                          "thresholdValue": "Resolved",
+                          "representation": "success",
+                          "text": "{0}{1}"
+                        },
+                        {
+                          "operator": "Default",
+                          "thresholdValue": null,
+                          "representation": "unknown",
+                          "text": "{0}{1}"
+                        }
+                      ]
+                    }
+                  }
+                ],
+                "sortBy": [
+                  {
+                    "itemKey": "Impact Start (UTC)",
+                    "sortOrder": 2
+                  }
+                ]
+              }
+            },
+            "name": "incidentsGrid"
+          }
+        ]
+      },
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "incidents"
+      },
+      "name": "Incidents & Alerts"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "### Service Health Timeline\nMonth-by-month view of **all** service health events (service issues, planned maintenance, health advisories) over the selected time range. Matches the **Health Timeline** tab of the Excel report."
+            },
+            "name": "timelineTitle"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "servicehealthresources\n| where type =~ 'microsoft.resourcehealth/events'\n| extend eventType = tostring(properties.EventType)\n| extend impactStartTicks = tolong(properties.ImpactStartTime)\n| extend impactEndTicks = tolong(properties.ImpactMitigationTime)\n| extend impactStart = iff(isnotnull(impactStartTicks) and impactStartTicks > 0, datetime_add('tick', impactStartTicks, datetime(0001-01-01)), datetime(null))\n| extend impactEnd = iff(isnotnull(impactEndTicks) and impactEndTicks > 0, datetime_add('tick', impactEndTicks, datetime(0001-01-01)), datetime(null))\n| where isnotnull(impactStart)\n| where impactStart >= datetime_add('month', -{MonthsBack}, now())\n| extend Title = tostring(properties.Title)\n| extend Status = tostring(properties.Status)\n| extend Level = tostring(properties.EventLevel)\n| extend Summary = tostring(properties.Summary)\n| mv-expand impact = properties.Impact\n| extend ImpactedService = tostring(impact.ImpactedService)\n| mv-expand impactedRegion = impact.ImpactedRegions\n| extend ImpactedRegionName = tostring(impactedRegion.ImpactedRegion)\n| summarize\n    AffectedServices = make_set(ImpactedService),\n    AffectedRegions = make_set(ImpactedRegionName)\n  by name, eventType, Title, Status, Level, Summary, impactStart, impactEnd\n| extend DurationMinutes = datetime_diff('minute', impactEnd, impactStart)\n| project\n    Month = format_datetime(impactStart, 'yyyy-MM'),\n    ['Month Name'] = format_datetime(impactStart, 'MMM yyyy'),\n    ['Event Type'] = eventType,\n    Status,\n    Title,\n    ['Impact Start (UTC)'] = format_datetime(impactStart, 'yyyy-MM-dd HH:mm'),\n    ['Impact End (UTC)'] = iff(isnotnull(impactEnd), format_datetime(impactEnd, 'yyyy-MM-dd HH:mm'), 'Ongoing'),\n    ['Duration (Hours)'] = iff(isnotnull(DurationMinutes), tostring(round(todouble(DurationMinutes) / 60.0, 2)), 'Ongoing'),\n    Level,\n    ['Affected Services'] = strcat_array(AffectedServices, '; '),\n    ['Affected Regions'] = strcat_array(AffectedRegions, '; '),\n    Summary,\n    ['Tracking ID'] = name\n| order by Month desc, ['Impact Start (UTC)'] desc",
+              "size": 0,
+              "noDataMessage": "No service health events found for the selected time range and subscriptions.",
+              "queryType": 1,
+              "resourceType": "microsoft.resourcegraph/resources",
+              "crossComponentResources": [
+                "{Subscriptions}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Status",
+                    "formatter": 18,
+                    "formatOptions": {
+                      "thresholdsOptions": "icons",
+                      "thresholdsGrid": [
+                        {
+                          "operator": "==",
+                          "thresholdValue": "Active",
+                          "representation": "warning",
+                          "text": "{0}{1}"
+                        },
+                        {
+                          "operator": "==",
+                          "thresholdValue": "Resolved",
+                          "representation": "success",
+                          "text": "{0}{1}"
+                        },
+                        {
+                          "operator": "Default",
+                          "thresholdValue": null,
+                          "representation": "unknown",
+                          "text": "{0}{1}"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "columnMatch": "Event Type",
+                    "formatter": 18,
+                    "formatOptions": {
+                      "thresholdsOptions": "icons",
+                      "thresholdsGrid": [
+                        {
+                          "operator": "==",
+                          "thresholdValue": "ServiceIssue",
+                          "representation": "critical",
+                          "text": "{0}{1}"
+                        },
+                        {
+                          "operator": "==",
+                          "thresholdValue": "PlannedMaintenance",
+                          "representation": "2",
+                          "text": "{0}{1}"
+                        },
+                        {
+                          "operator": "==",
+                          "thresholdValue": "HealthAdvisory",
+                          "representation": "4",
+                          "text": "{0}{1}"
+                        },
+                        {
+                          "operator": "Default",
+                          "thresholdValue": null,
+                          "representation": "unknown",
+                          "text": "{0}{1}"
+                        }
+                      ]
+                    }
+                  }
+                ],
+                "sortBy": [
+                  {
+                    "itemKey": "Month",
+                    "sortOrder": 2
+                  }
+                ]
+              }
+            },
+            "name": "timelineGrid"
+          }
+        ]
+      },
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "timeline"
+      },
+      "name": "Health Timeline"
+    }
+  ],
+  "fallbackResourceIds": [
+    "Azure Monitor"
+  ],
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+}
