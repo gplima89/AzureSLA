@@ -98,7 +98,7 @@ function Test-Prerequisites {
             $ctx = Get-AzContext
         } catch {
             Write-Host "`n[ERROR] Failed to authenticate to Azure." -ForegroundColor Red
-            Write-Host @"
+            $troubleshootMsg = @"
 
   ╔═══ TROUBLESHOOTING STEPS ═══════════════════════════════════════════╗
   ║                                                                     ║
@@ -117,7 +117,8 @@ function Test-Prerequisites {
   ║     then retry Connect-AzAccount.                                   ║
   ║                                                                     ║
   ╚═════════════════════════════════════════════════════════════════════╝
-"@ -ForegroundColor Yellow
+"@
+            Write-Host $troubleshootMsg -ForegroundColor Yellow
             throw "Azure authentication failed. See troubleshooting steps above."
         }
     }
@@ -1335,7 +1336,7 @@ try {
     Write-Host "  Stack: $($_.ScriptStackTrace)" -ForegroundColor DarkRed
 
     if ($_.Exception.Message -like "*Login*" -or $_.Exception.Message -like "*auth*" -or $_.Exception.Message -like "*token*") {
-        Write-Host @"
+        $authTroubleshootMsg = @"
 
   ╔═══ AUTHENTICATION TROUBLESHOOTING ═════════════════════════════════╗
   ║                                                                     ║
@@ -1350,7 +1351,8 @@ try {
   ║       Set-AzContext -SubscriptionId <your-id>                       ║
   ║                                                                     ║
   ╚═════════════════════════════════════════════════════════════════════╝
-"@ -ForegroundColor Yellow
+"@
+        Write-Host $authTroubleshootMsg -ForegroundColor Yellow
     }
 
     exit 1
