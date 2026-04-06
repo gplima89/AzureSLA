@@ -130,11 +130,11 @@ function Test-Prerequisites {
     Write-Host "`n── Resolving subscription scope ──" -ForegroundColor Cyan
     if ($SubscriptionIds -and $SubscriptionIds.Count -gt 0) {
         # User specified explicit subscription IDs
-        $targetSubs = @()
+        $targetSubs = [System.Collections.Generic.List[object]]::new()
         foreach ($sid in $SubscriptionIds) {
             try {
                 $s = Get-AzSubscription -SubscriptionId $sid -ErrorAction Stop
-                $targetSubs += $s
+                $targetSubs.Add($s)
                 Write-Host "[  OK  ] $($s.Name) ($($s.Id)) — $($s.State)" -ForegroundColor Green
             } catch {
                 Write-Host "[WARN ] Subscription '$sid' not accessible — skipping" -ForegroundColor Yellow
@@ -275,6 +275,9 @@ function Invoke-PaginatedGraphQuery {
         First runs a count query to log the total, then fetches all rows in
         batches of 1000 using -First / -Skip (up to 5 000) and $SkipToken
         (beyond 5 000).
+
+        Automatically batches subscriptions into groups of 200 to stay within
+        the Search-AzGraph -Subscription limit.
     #>
     [CmdletBinding()]
     param(
@@ -283,69 +286,94 @@ function Invoke-PaginatedGraphQuery {
         [int]$BatchSize = 1000
     )
 
-    # ── 1. Count query ──────────────────────────────────────────────────
-    $countQuery = @"
+    # ── 0. Split subscriptions into batches of 200 (ARG limit) ──────────
+    $maxSubsPerQuery = 200
+    $allSubIds = @($script:ResolvedSubscriptionIds)
+    $subBatches = [System.Collections.Generic.List[string[]]]::new()
+
+    for ($i = 0; $i -lt $allSubIds.Count; $i += $maxSubsPerQuery) {
+        $end = [Math]::Min($i + $maxSubsPerQuery, $allSubIds.Count) - 1
+        $subBatches.Add([string[]]@($allSubIds[$i..$end]))
+    }
+
+    if ($subBatches.Count -gt 1) {
+        Write-Host "[INFO ] Splitting $($allSubIds.Count) subscriptions into $($subBatches.Count) batches of max $maxSubsPerQuery for $Label" -ForegroundColor Cyan
+    }
+
+    $allResults = [System.Collections.Generic.List[object]]::new()
+    $subBatchIndex = 0
+
+    foreach ($subBatch in $subBatches) {
+        $subBatchIndex++
+        $subBatchPrefix = if ($subBatches.Count -gt 1) { "Sub-batch $subBatchIndex/$($subBatches.Count): " } else { "" }
+
+        # ── 1. Count query ──────────────────────────────────────────────
+        $countQuery = @"
 $Query
 | count
 "@
-    try {
-        $countResult = Search-AzGraph -Query $countQuery -First 1 `
-            -Subscription $script:ResolvedSubscriptionIds -ErrorAction Stop
-        $totalCount = [int]($countResult | Select-Object -ExpandProperty Count_ -ErrorAction SilentlyContinue)
-        if (-not $totalCount) { $totalCount = [int]($countResult.Count_) }
-        Write-Host "[INFO ] Total $Label to retrieve: $totalCount" -ForegroundColor Cyan
-    } catch {
-        Write-Host "[WARN ] Count query failed — will paginate until exhausted." -ForegroundColor Yellow
-        $totalCount = -1        # unknown; keep paging until empty
-    }
-
-    # ── 2. Paginated fetch ──────────────────────────────────────────────
-    $allResults  = [System.Collections.Generic.List[object]]::new()
-    $skip        = 0
-    $skipToken   = $null
-    $batchNum    = 0
-
-    while ($true) {
-        $batchNum++
-        $params = @{
-            Query        = $Query
-            First        = $BatchSize
-            Subscription = $script:ResolvedSubscriptionIds
-            ErrorAction  = 'Stop'
-        }
-
-        if ($skipToken) {
-            $params['SkipToken'] = $skipToken
-        } elseif ($skip -gt 0) {
-            $params['Skip'] = $skip
-        }
-
+        $totalCount = -1
         try {
-            $batch = Search-AzGraph @params
+            $countResult = Search-AzGraph -Query $countQuery -First 1 `
+                -Subscription $subBatch -ErrorAction Stop
+            $totalCount = [int]($countResult | Select-Object -ExpandProperty Count_ -ErrorAction SilentlyContinue)
+            if (-not $totalCount) { $totalCount = [int]($countResult.Count_) }
+            Write-Host "[INFO ] ${subBatchPrefix}Total $Label to retrieve: $totalCount" -ForegroundColor Cyan
         } catch {
-            Write-Host "[WARN ] Batch $batchNum failed: $($_.Exception.Message)" -ForegroundColor Yellow
-            break
+            Write-Host "[WARN ] ${subBatchPrefix}Count query failed — will paginate until exhausted." -ForegroundColor Yellow
         }
 
-        if (-not $batch -or $batch.Count -eq 0) { break }
+        if ($totalCount -eq 0) { continue }
 
-        $allResults.AddRange(@($batch))
-        Write-Host "[INFO ] Batch $batchNum — fetched $($batch.Count) $Label (total so far: $($allResults.Count))" -ForegroundColor Gray
+        # ── 2. Paginated fetch ──────────────────────────────────────────
+        $skip      = 0
+        $skipToken = $null
+        $batchNum  = 0
+        $batchResults = 0
 
-        # Determine next page strategy
-        if ($batch.SkipToken) {
-            $skipToken = $batch.SkipToken
-        } else {
-            $skipToken = $null
-            $skip += $batch.Count
+        while ($true) {
+            $batchNum++
+            $params = @{
+                Query        = $Query
+                First        = $BatchSize
+                Subscription = $subBatch
+                ErrorAction  = 'Stop'
+            }
+
+            if ($skipToken) {
+                $params['SkipToken'] = $skipToken
+            } elseif ($skip -gt 0) {
+                $params['Skip'] = $skip
+            }
+
+            try {
+                $batch = Search-AzGraph @params
+            } catch {
+                Write-Host "[WARN ] ${subBatchPrefix}Batch $batchNum failed: $($_.Exception.Message)" -ForegroundColor Yellow
+                break
+            }
+
+            if (-not $batch -or $batch.Count -eq 0) { break }
+
+            $allResults.AddRange(@($batch))
+            $batchResults += $batch.Count
+            Write-Host "[INFO ] ${subBatchPrefix}Batch $batchNum — fetched $($batch.Count) $Label (sub-batch total: $batchResults)" -ForegroundColor Gray
+
+            # Determine next page strategy
+            if ($batch.SkipToken) {
+                $skipToken = $batch.SkipToken
+            } else {
+                $skipToken = $null
+                $skip += $batch.Count
+            }
+
+            # Stop when we've collected everything for this sub-batch
+            if ($totalCount -ge 0 -and $batchResults -ge $totalCount) { break }
+            if ($batch.Count -lt $BatchSize) { break }
         }
-
-        # Stop when we've collected everything
-        if ($totalCount -ge 0 -and $allResults.Count -ge $totalCount) { break }
-        if ($batch.Count -lt $BatchSize) { break }
     }
 
-    Write-Host "[  OK  ] Retrieved $($allResults.Count) $Label (paginated)" -ForegroundColor Green
+    Write-Host "[  OK  ] Retrieved $($allResults.Count) $Label (paginated across $($subBatches.Count) subscription batch(es))" -ForegroundColor Green
     return , $allResults.ToArray()
 }
 
@@ -400,10 +428,57 @@ servicehealthresources
     }
 }
 
+function Get-ActivityLogViaApi {
+    <#
+    .SYNOPSIS
+        Queries Activity Log events for a single subscription using the REST API.
+        Returns parsed event objects. Handles pagination via nextLink.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$SubscriptionId,
+        [Parameter(Mandatory)][string]$Filter,
+        [string]$SubscriptionName = $SubscriptionId
+    )
+
+    $apiVersion = '2015-04-01'
+    $path = "/subscriptions/$SubscriptionId/providers/Microsoft.Insights/eventtypes/management/values?api-version=$apiVersion&`$filter=$Filter"
+    $events = [System.Collections.Generic.List[object]]::new()
+
+    while ($path) {
+        try {
+            $response = Invoke-AzRestMethod -Path $path -ErrorAction Stop
+            if ($response.StatusCode -ne 200) {
+                Write-Host "  [WARN ] API returned $($response.StatusCode) for subscription $SubscriptionName" -ForegroundColor Yellow
+                break
+            }
+            $body = $response.Content | ConvertFrom-Json
+            if ($body.value) {
+                $events.AddRange(@($body.value))
+            }
+            # Follow pagination
+            if ($body.nextLink) {
+                # nextLink is a full URL; extract the path+query portion for Invoke-AzRestMethod
+                $uri = [System.Uri]$body.nextLink
+                $path = $uri.PathAndQuery
+            } else {
+                $path = $null
+            }
+        } catch {
+            Write-Host "  [WARN ] API call failed for subscription $SubscriptionName : $($_.Exception.Message)" -ForegroundColor Yellow
+            break
+        }
+    }
+    return , $events.ToArray()
+}
+
 function Get-ServiceHealthAlerts {
     <#
     .SYNOPSIS
         Retrieves Service Health alerts from Activity Log for the past month.
+        Uses direct REST API calls via Invoke-AzRestMethod to avoid the overhead
+        of Set-AzContext per subscription (much faster for large environments).
+        Parallelises requests on PowerShell 7+ using ForEach-Object -Parallel.
     #>
     [CmdletBinding()]
     param(
@@ -411,70 +486,192 @@ function Get-ServiceHealthAlerts {
         [datetime]$EndDate
     )
 
-    Write-Host "── Querying Service Health alerts from Activity Log ──" -ForegroundColor Cyan
+    Write-Host "── Querying Service Health alerts from Activity Log (REST API) ──" -ForegroundColor Cyan
 
-    $alerts = @()
-    try {
-        # Save current context to restore later
-        $originalContext = Get-AzContext
+    # ── Build subscription-name lookup upfront ──────────────────────────
+    $subNameMap = @{}
+    foreach ($sub in (Get-AzSubscription -ErrorAction SilentlyContinue)) {
+        $subNameMap[$sub.Id] = $sub.Name
+    }
 
-        foreach ($subId in $script:ResolvedSubscriptionIds) {
-            # Switch context to each subscription for Activity Log queries
-            Set-AzContext -SubscriptionId $subId -ErrorAction SilentlyContinue | Out-Null
-            $subName = (Get-AzContext).Subscription.Name
-            Write-Host "  Scanning subscription: $subName" -ForegroundColor Gray
+    # OData filter strings for the Activity Log API
+    $startIso = $StartDate.ToUniversalTime().ToString('o')
+    $endIso   = $EndDate.ToUniversalTime().ToString('o')
 
-            # Get Resource Health events from Activity Log
-            $logs = Get-AzActivityLog -StartTime $StartDate -EndTime $EndDate `
-                -ResourceProvider "Microsoft.ResourceHealth" -MaxRecord 1000 -ErrorAction SilentlyContinue
+    $filterResourceHealth = "eventTimestamp ge '$startIso' and eventTimestamp le '$endIso' and resourceProvider eq 'Microsoft.ResourceHealth'"
+    $filterServiceHealth  = "eventTimestamp ge '$startIso' and eventTimestamp le '$endIso' and eventChannels eq 'Admin, Operation, Service'"
 
-            if ($logs) {
-                foreach ($log in $logs) {
-                    $alerts += [PSCustomObject]@{
-                        Timestamp       = $log.EventTimestamp
-                        Category        = $log.Category.Value
-                        Level           = $log.Level
-                        OperationName   = $log.OperationName.Value
-                        Status          = $log.Status.Value
-                        Description     = $log.Description
-                        ResourceId      = $log.ResourceId
-                        CorrelationId   = $log.CorrelationId
-                        Subscription    = $subName
-                    }
-                }
-            }
+    $alerts = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
+    $totalSubs = $script:ResolvedSubscriptionIds.Count
 
-            # Also get ServiceHealth category events
-            $shLogs = Get-AzActivityLog -StartTime $StartDate -EndTime $EndDate `
-                -MaxRecord 1000 -ErrorAction SilentlyContinue |
-                Where-Object { $_.Category.Value -eq 'ServiceHealth' }
+    # ── Helper script block (used by both parallel and sequential paths) ─
+    $processSubscription = {
+        param($subId, $subName, $filterRH, $filterSH)
 
-            if ($shLogs) {
-                foreach ($log in $shLogs) {
-                    $alerts += [PSCustomObject]@{
-                        Timestamp       = $log.EventTimestamp
-                        Category        = 'ServiceHealth'
-                        Level           = $log.Level
-                        OperationName   = $log.OperationName.Value
-                        Status          = $log.Status.Value
-                        Description     = $log.Description
-                        ResourceId      = $log.ResourceId
-                        CorrelationId   = $log.CorrelationId
-                        Subscription    = $subName
-                    }
-                }
+        # 1. Resource Health events
+        $rhEvents = Get-ActivityLogViaApi -SubscriptionId $subId -Filter $filterRH -SubscriptionName $subName
+        foreach ($ev in $rhEvents) {
+            [PSCustomObject]@{
+                Timestamp     = $ev.eventTimestamp
+                Category      = $ev.category.value
+                Level         = $ev.level
+                OperationName = $ev.operationName.value
+                Status        = $ev.status.value
+                Description   = $ev.description
+                ResourceId    = $ev.resourceId
+                CorrelationId = $ev.correlationId
+                Subscription  = $subName
             }
         }
 
-        # Restore original context
-        Set-AzContext -SubscriptionId $originalContext.Subscription.Id -ErrorAction SilentlyContinue | Out-Null
-
-        Write-Host "[  OK  ] Retrieved $($alerts.Count) health alerts from Activity Log across $($script:ResolvedSubscriptionIds.Count) subscription(s)" -ForegroundColor Green
-    } catch {
-        Write-Host "[WARN ] Activity Log query failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        # 2. ServiceHealth events
+        $shEvents = Get-ActivityLogViaApi -SubscriptionId $subId -Filter $filterSH -SubscriptionName $subName
+        foreach ($ev in $shEvents) {
+            if ($ev.category.value -ne 'ServiceHealth') { continue }
+            [PSCustomObject]@{
+                Timestamp     = $ev.eventTimestamp
+                Category      = 'ServiceHealth'
+                Level         = $ev.level
+                OperationName = $ev.operationName.value
+                Status        = $ev.status.value
+                Description   = $ev.description
+                ResourceId    = $ev.resourceId
+                CorrelationId = $ev.correlationId
+                Subscription  = $subName
+            }
+        }
     }
 
-    return $alerts
+    try {
+        $isPwsh7 = $PSVersionTable.PSVersion.Major -ge 7
+
+        if ($isPwsh7) {
+            # ── Parallel execution (PowerShell 7+) ──────────────────────
+            Write-Host "[INFO ] Using parallel API calls ($totalSubs subscriptions, throttle 10)" -ForegroundColor Cyan
+
+            # Thread-safe counter for progress tracking
+            $progressCounter = [System.Collections.Concurrent.ConcurrentDictionary[string,string]]::new()
+            $completedCount  = [ref] 0
+
+            # Run the parallel work as a PowerShell job so we can poll progress
+            $parallelJob = {
+                param($subIds, $subNameMap, $alerts, $filterRH, $filterSH, $progressCounter, $completedCount)
+                $subIds | ForEach-Object -ThrottleLimit 10 -Parallel {
+                    $subId    = $_
+                    $nameMap  = $using:subNameMap
+                    $subName  = if ($nameMap[$subId]) { $nameMap[$subId] } else { $subId }
+                    $bag      = $using:alerts
+                    $progress = $using:progressCounter
+                    $done     = $using:completedCount
+
+                    $progress[$subId] = $subName  # mark as in-progress
+
+                    function Get-ActivityLogViaApi {
+                        param([string]$SubscriptionId, [string]$Filter, [string]$SubscriptionName)
+                        $path = "/subscriptions/$SubscriptionId/providers/Microsoft.Insights/eventtypes/management/values?api-version=2015-04-01&`$filter=$Filter"
+                        $events = [System.Collections.Generic.List[object]]::new()
+                        while ($path) {
+                            try {
+                                $response = Invoke-AzRestMethod -Path $path -ErrorAction Stop
+                                if ($response.StatusCode -ne 200) { break }
+                                $body = $response.Content | ConvertFrom-Json
+                                if ($body.value) { $events.AddRange(@($body.value)) }
+                                if ($body.nextLink) { $path = ([System.Uri]$body.nextLink).PathAndQuery } else { $path = $null }
+                            } catch { break }
+                        }
+                        return , $events.ToArray()
+                    }
+
+                    # Resource Health events
+                    $rhEvents = Get-ActivityLogViaApi -SubscriptionId $subId -Filter $using:filterRH -SubscriptionName $subName
+                    foreach ($ev in $rhEvents) {
+                        $bag.Add([PSCustomObject]@{
+                            Timestamp     = $ev.eventTimestamp
+                            Category      = $ev.category.value
+                            Level         = $ev.level
+                            OperationName = $ev.operationName.value
+                            Status        = $ev.status.value
+                            Description   = $ev.description
+                            ResourceId    = $ev.resourceId
+                            CorrelationId = $ev.correlationId
+                            Subscription  = $subName
+                        })
+                    }
+
+                    # ServiceHealth events
+                    $shEvents = Get-ActivityLogViaApi -SubscriptionId $subId -Filter $using:filterSH -SubscriptionName $subName
+                    foreach ($ev in $shEvents) {
+                        if ($ev.category.value -ne 'ServiceHealth') { continue }
+                        $bag.Add([PSCustomObject]@{
+                            Timestamp     = $ev.eventTimestamp
+                            Category      = 'ServiceHealth'
+                            Level         = $ev.level
+                            OperationName = $ev.operationName.value
+                            Status        = $ev.status.value
+                            Description   = $ev.description
+                            ResourceId    = $ev.resourceId
+                            CorrelationId = $ev.correlationId
+                            Subscription  = $subName
+                        })
+                    }
+
+                    # Mark completed
+                    [System.Threading.Interlocked]::Increment($done) | Out-Null
+                    $removed = $null
+                    $progress.TryRemove($subId, [ref]$removed) | Out-Null
+                }
+            }
+
+            # Start the parallel work in a background thread
+            $ps = [powershell]::Create()
+            $ps.AddScript($parallelJob).AddArgument($script:ResolvedSubscriptionIds).AddArgument($subNameMap).AddArgument($alerts).AddArgument($filterResourceHealth).AddArgument($filterServiceHealth).AddArgument($progressCounter).AddArgument($completedCount) | Out-Null
+            $asyncResult = $ps.BeginInvoke()
+
+            # ── Poll progress bar while parallel work runs ──────────────
+            $progressId = 1
+            while (-not $asyncResult.IsCompleted) {
+                $done    = $completedCount.Value
+                $pct     = if ($totalSubs -gt 0) { [int][Math]::Min(100, ($done / $totalSubs) * 100) } else { 0 }
+                $running = @($progressCounter.Values)
+                $statusMsg = if ($running.Count -gt 0) {
+                    "Active: $($running[0..([Math]::Min(2, $running.Count - 1))] -join ', ')" +
+                    $(if ($running.Count -gt 3) { " +$($running.Count - 3) more" })
+                } else { "Starting..." }
+
+                Write-Progress -Id $progressId `
+                    -Activity "Querying Activity Logs ($done/$totalSubs subscriptions)" `
+                    -Status $statusMsg `
+                    -PercentComplete $pct
+
+                Start-Sleep -Milliseconds 500
+            }
+
+            # Final update and cleanup
+            $ps.EndInvoke($asyncResult)
+            $ps.Dispose()
+            Write-Progress -Id $progressId -Activity "Querying Activity Logs" -Completed
+        } else {
+            # ── Sequential execution (Windows PowerShell 5.1) ───────────
+            Write-Host "[INFO ] Using sequential API calls ($totalSubs subscriptions)" -ForegroundColor Cyan
+            $counter = 0
+            foreach ($subId in $script:ResolvedSubscriptionIds) {
+                $counter++
+                $subName = if ($subNameMap[$subId]) { $subNameMap[$subId] } else { $subId }
+                Write-Host "  [$counter/$totalSubs] $subName" -ForegroundColor Gray
+
+                $results = & $processSubscription $subId $subName $filterResourceHealth $filterServiceHealth
+                foreach ($r in $results) { $alerts.Add($r) }
+            }
+        }
+
+        $alertList = @($alerts.ToArray())
+        Write-Host "[  OK  ] Retrieved $($alertList.Count) health alerts from Activity Log across $totalSubs subscription(s)" -ForegroundColor Green
+    } catch {
+        Write-Host "[WARN ] Activity Log query failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        $alertList = @()
+    }
+
+    return $alertList
 }
 
 function Get-ResourceInventory {
@@ -673,7 +870,28 @@ function Build-SLAMatrix {
     Write-Host "`n── Building SLA matrix ──" -ForegroundColor Cyan
 
     $serviceCategories = @('Compute', 'SQL DB', 'Web Apps', 'Storage')
-    $slaRows = @()
+    $slaRows = [System.Collections.Generic.List[object]]::new()
+
+    # ── Pre-index health data by region|category for O(1) lookup ────────
+    $healthIndex = @{}
+    foreach ($h in $HealthData) {
+        $key = "$($h.location)|$($h.ServiceCategory)"
+        if (-not $healthIndex.ContainsKey($key)) {
+            $healthIndex[$key] = [System.Collections.Generic.List[object]]::new()
+        }
+        $healthIndex[$key].Add($h)
+    }
+
+    # ── Pre-index resource counts by region|category ────────────────────
+    $resourceCountIndex = @{}
+    foreach ($r in $Resources) {
+        $key = "$($r.location)|$($r.ServiceCategory)"
+        if ($resourceCountIndex.ContainsKey($key)) {
+            $resourceCountIndex[$key]++
+        } else {
+            $resourceCountIndex[$key] = 1
+        }
+    }
 
     foreach ($region in $TargetRegions) {
         $regionDisplay = if ($RegionDisplayNames[$region]) { $RegionDisplayNames[$region] } else { $region }
@@ -684,12 +902,14 @@ function Build-SLAMatrix {
                 'Service'  = $category
             }
 
-            # Count resources in this region/category
-            $resourceCount = ($Resources | Where-Object {
-                $_.location -eq $region -and $_.ServiceCategory -eq $category
-            }).Count
+            # Count resources in this region/category (pre-indexed)
+            $rcKey = "$region|$category"
+            $resourceCount = if ($resourceCountIndex.ContainsKey($rcKey)) { $resourceCountIndex[$rcKey] } else { 0 }
 
             $row['Resource Count'] = $resourceCount
+
+            # Get pre-indexed health data for this region/category
+            $regionCategoryHealth = if ($healthIndex.ContainsKey($rcKey)) { $healthIndex[$rcKey] } else { @() }
 
             # Build month columns
             for ($i = $MonthsBack - 1; $i -ge 0; $i--) {
@@ -700,7 +920,7 @@ function Build-SLAMatrix {
 
                 # Calculate availability for this month
                 $availability = Calculate-MonthlyAvailability `
-                    -HealthData $HealthData `
+                    -HealthData $regionCategoryHealth `
                     -Incidents $Incidents `
                     -Region $region `
                     -ServiceCategory $category `
@@ -711,7 +931,7 @@ function Build-SLAMatrix {
                 $row[$monthLabel] = $availability
             }
 
-            $slaRows += [PSCustomObject]$row
+            $slaRows.Add([PSCustomObject]$row)
         }
     }
 
@@ -745,9 +965,8 @@ function Calculate-MonthlyAvailability {
     $downtimeMinutes = 0
 
     # ── Check for unavailable health records in this period ──
+    # HealthData is already pre-filtered to this region+category by caller
     $unhealthyRecords = $HealthData | Where-Object {
-        $_.location -eq $Region -and
-        $_.ServiceCategory -eq $ServiceCategory -and
         $_.availabilityState -ne 'Available' -and
         $_.occurredTime -ge $MonthStart -and
         $_.occurredTime -le $MonthEnd
@@ -838,7 +1057,7 @@ function Build-IncidentsTable {
 
     Write-Host "`n── Building incidents & alerts table ──" -ForegroundColor Cyan
 
-    $rows = @()
+    $rows = [System.Collections.Generic.List[object]]::new()
 
     # ── Process Service Health incidents ──
     foreach ($inc in $Incidents) {
@@ -882,7 +1101,7 @@ function Build-IncidentsTable {
             [Math]::Round(([datetime]$inc.impactEndTime - [datetime]$inc.impactStartTime).TotalHours, 2)
         } else { "Ongoing" }
 
-        $rows += [PSCustomObject][ordered]@{
+        $rows.Add([PSCustomObject][ordered]@{
             'Source'             = 'Service Health'
             'Type'               = $inc.eventType
             'Status'             = $inc.status
@@ -895,12 +1114,12 @@ function Build-IncidentsTable {
             'Affected Regions'   = ($regionsAffected | Select-Object -Unique) -join '; '
             'Summary'            = if ($inc.summary) { ($inc.summary -replace '<[^>]+>', '' ).Substring(0, [Math]::Min(500, ($inc.summary -replace '<[^>]+>', '').Length)) } else { "" }
             'Tracking ID'        = $inc.name
-        }
+        })
     }
 
     # ── Process Activity Log alerts ──
     foreach ($alert in $Alerts) {
-        $rows += [PSCustomObject][ordered]@{
+        $rows.Add([PSCustomObject][ordered]@{
             'Source'             = 'Activity Log'
             'Type'               = $alert.Category
             'Status'             = $alert.Status
@@ -914,7 +1133,7 @@ function Build-IncidentsTable {
             'Subscription'       = if ($alert.Subscription) { $alert.Subscription } else { "" }
             'Summary'            = if ($alert.Description) { $alert.Description.Substring(0, [Math]::Min(500, $alert.Description.Length)) } else { "" }
             'Tracking ID'        = $alert.CorrelationId
-        }
+        })
     }
 
     Write-Host "[  OK  ] Incidents table: $($rows.Count) entries for target regions" -ForegroundColor Green
@@ -937,7 +1156,7 @@ function Build-ServiceHealthTimeline {
 
     Write-Host "`n── Building service health timeline ──" -ForegroundColor Cyan
 
-    $rows = @()
+    $rows = [System.Collections.Generic.List[object]]::new()
 
     foreach ($inc in $Incidents) {
         if ($null -eq $inc.impactStartTime) { continue }
@@ -986,7 +1205,7 @@ function Build-ServiceHealthTimeline {
             [Math]::Round(($incEnd - $incStart).TotalHours, 2)
         } else { "Ongoing" }
 
-        $rows += [PSCustomObject][ordered]@{
+        $rows.Add([PSCustomObject][ordered]@{
             'Month'              = $incStart.ToString("yyyy-MM")
             'Month Name'         = $incStart.ToString("MMM yyyy")
             'Event Type'         = $inc.eventType
@@ -1000,7 +1219,7 @@ function Build-ServiceHealthTimeline {
             'Affected Regions'   = ($regionsAffected | Select-Object -Unique) -join '; '
             'Summary'            = if ($inc.summary) { ($inc.summary -replace '<[^>]+>', '').Substring(0, [Math]::Min(500, ($inc.summary -replace '<[^>]+>', '').Length)) } else { "" }
             'Tracking ID'        = $inc.name
-        }
+        })
     }
 
     # Sort by month descending, then by start time descending
