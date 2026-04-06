@@ -889,6 +889,7 @@ function Build-SLAMatrix {
     $slaRows = [System.Collections.Generic.List[object]]::new()
 
     # ── Pre-index health data by region|category for O(1) lookup ────────
+    Write-Host "[INFO ] Pre-indexing health data..." -ForegroundColor Gray
     $healthIndex = @{}
     foreach ($h in $HealthData) {
         $key = "$($h.location)|$($h.ServiceCategory)"
@@ -897,6 +898,7 @@ function Build-SLAMatrix {
         }
         $healthIndex[$key].Add($h)
     }
+    Write-Host "[INFO ] Health index: $($healthIndex.Count) region|category groups from $($HealthData.Count) records" -ForegroundColor Gray
 
     # ── Pre-index resource counts by region|category ────────────────────
     $resourceCountIndex = @{}
@@ -909,10 +911,90 @@ function Build-SLAMatrix {
         }
     }
 
+    # ── Pre-process incidents: build a lookup of (region, service) → incident windows ──
+    Write-Host "[INFO ] Pre-indexing incidents..." -ForegroundColor Gray
+    $serviceTypeMap = @{
+        'Compute'  = @('Virtual Machines', 'Compute', 'Virtual Machine Scale Sets')
+        'SQL DB'   = @('SQL Database', 'SQL Managed Instance', 'Azure SQL', 'SQL')
+        'Web Apps' = @('App Service', 'Web Apps', 'App Service (Web Apps)')
+        'Storage'  = @('Storage', 'Storage Accounts')
+    }
+
+    # incidentIndex: key = "region|category" → list of @{ Start; End }
+    $incidentIndex = @{}
+    foreach ($incident in $Incidents) {
+        if ($null -eq $incident.impactedServices) { continue }
+
+        $impactedServicesArray = if ($incident.impactedServices -is [array]) {
+            $incident.impactedServices
+        } else {
+            @($incident.impactedServices)
+        }
+
+        foreach ($impact in $impactedServicesArray) {
+            $serviceName = if ($impact.ImpactedService) { $impact.ImpactedService } else { $impact.ServiceName }
+            $impactedRegions = if ($impact.ImpactedRegions) { $impact.ImpactedRegions } else { @() }
+
+            # Determine which of our categories this service matches
+            $matchedCategories = @()
+            foreach ($cat in $serviceCategories) {
+                foreach ($svcName in $serviceTypeMap[$cat]) {
+                    if ($serviceName -like "*$svcName*") {
+                        $matchedCategories += $cat
+                        break
+                    }
+                }
+            }
+            if ($matchedCategories.Count -eq 0) { continue }
+
+            # Determine which of our target regions this impact matches
+            $matchedRegions = @()
+            foreach ($region in $TargetRegions) {
+                $regionDisplay = if ($RegionDisplayNames[$region]) { $RegionDisplayNames[$region] } else { $region }
+                foreach ($ir in $impactedRegions) {
+                    $irName = if ($ir.ImpactedRegion) { $ir.ImpactedRegion } else { $ir }
+                    if ($irName -like "*$regionDisplay*" -or $irName -eq $region) {
+                        $matchedRegions += $region
+                        break
+                    }
+                }
+            }
+            if ($matchedRegions.Count -eq 0) { continue }
+
+            # Add the incident window to each matching region|category
+            $incStart = [datetime]$incident.impactStartTime
+            $incEnd   = if ($incident.impactEndTime) { [datetime]$incident.impactEndTime } else { $null }
+
+            foreach ($mr in $matchedRegions) {
+                foreach ($mc in $matchedCategories) {
+                    $iKey = "$mr|$mc"
+                    if (-not $incidentIndex.ContainsKey($iKey)) {
+                        $incidentIndex[$iKey] = [System.Collections.Generic.List[object]]::new()
+                    }
+                    $incidentIndex[$iKey].Add(@{ Start = $incStart; End = $incEnd })
+                }
+            }
+        }
+    }
+    Write-Host "[INFO ] Incident index: $($incidentIndex.Count) region|category groups" -ForegroundColor Gray
+
+    # ── Build SLA rows with progress tracking ───────────────────────────
+    $totalCells   = $TargetRegions.Count * $serviceCategories.Count
+    $cellsDone    = 0
+    $progressId   = 2
+    $swMatrix     = [System.Diagnostics.Stopwatch]::StartNew()
+
     foreach ($region in $TargetRegions) {
         $regionDisplay = if ($RegionDisplayNames[$region]) { $RegionDisplayNames[$region] } else { $region }
 
         foreach ($category in $serviceCategories) {
+            $cellsDone++
+            $pct = [int][Math]::Min(100, ($cellsDone / $totalCells) * 100)
+            Write-Progress -Id $progressId `
+                -Activity "Building SLA matrix ($cellsDone/$totalCells)" `
+                -Status "$regionDisplay — $category" `
+                -PercentComplete $pct
+
             $row = [ordered]@{
                 'Region'   = $regionDisplay
                 'Service'  = $category
@@ -924,8 +1006,9 @@ function Build-SLAMatrix {
 
             $row['Resource Count'] = $resourceCount
 
-            # Get pre-indexed health data for this region/category
-            $regionCategoryHealth = if ($healthIndex.ContainsKey($rcKey)) { $healthIndex[$rcKey] } else { @() }
+            # Get pre-indexed health data and incidents for this region/category
+            $regionCategoryHealth    = if ($healthIndex.ContainsKey($rcKey))    { $healthIndex[$rcKey] }    else { @() }
+            $regionCategoryIncidents = if ($incidentIndex.ContainsKey($rcKey))  { $incidentIndex[$rcKey] }  else { @() }
 
             # Build month columns
             for ($i = $MonthsBack - 1; $i -ge 0; $i--) {
@@ -937,9 +1020,7 @@ function Build-SLAMatrix {
                 # Calculate availability for this month
                 $availability = Calculate-MonthlyAvailability `
                     -HealthData $regionCategoryHealth `
-                    -Incidents $Incidents `
-                    -Region $region `
-                    -ServiceCategory $category `
+                    -IncidentWindows $regionCategoryIncidents `
                     -MonthStart $monthStart `
                     -MonthEnd $monthEnd `
                     -ResourceCount $resourceCount
@@ -951,7 +1032,9 @@ function Build-SLAMatrix {
         }
     }
 
-    Write-Host "[  OK  ] SLA matrix built: $($slaRows.Count) rows" -ForegroundColor Green
+    Write-Progress -Id $progressId -Activity "Building SLA matrix" -Completed
+    $swMatrix.Stop()
+    Write-Host "[  OK  ] SLA matrix built: $($slaRows.Count) rows in $([Math]::Round($swMatrix.Elapsed.TotalSeconds, 1))s" -ForegroundColor Green
     return $slaRows
 }
 
@@ -959,14 +1042,12 @@ function Calculate-MonthlyAvailability {
     <#
     .SYNOPSIS
         Calculates the availability percentage for a given region, service category,
-        and month based on health data and incident records.
+        and month based on pre-indexed health data and incident windows.
     #>
     [CmdletBinding()]
     param(
         [array]$HealthData,
-        [array]$Incidents,
-        [string]$Region,
-        [string]$ServiceCategory,
+        [array]$IncidentWindows,
         [datetime]$MonthStart,
         [datetime]$MonthEnd,
         [int]$ResourceCount
@@ -982,72 +1063,27 @@ function Calculate-MonthlyAvailability {
 
     # ── Check for unavailable health records in this period ──
     # HealthData is already pre-filtered to this region+category by caller
-    $unhealthyRecords = $HealthData | Where-Object {
-        $_.availabilityState -ne 'Available' -and
-        $_.occurredTime -ge $MonthStart -and
-        $_.occurredTime -le $MonthEnd
-    }
-
-    if ($unhealthyRecords -and $unhealthyRecords.Count -gt 0) {
-        # Estimate downtime based on number of unhealthy events (each event ~= some downtime window)
-        $downtimeMinutes += ($unhealthyRecords.Count * 30)  # conservative 30-min estimate per event
-    }
-
-    # ── Check for incidents impacting this region/service ──
-    $serviceTypeMap = @{
-        'Compute'  = @('Virtual Machines', 'Compute', 'Virtual Machine Scale Sets')
-        'SQL DB'   = @('SQL Database', 'SQL Managed Instance', 'Azure SQL', 'SQL')
-        'Web Apps' = @('App Service', 'Web Apps', 'App Service (Web Apps)')
-        'Storage'  = @('Storage', 'Storage Accounts')
-    }
-
-    $relevantServiceNames = $serviceTypeMap[$ServiceCategory]
-
-    foreach ($incident in $Incidents) {
-        if ($null -eq $incident.impactedServices) { continue }
-
-        $impactedServicesArray = if ($incident.impactedServices -is [array]) {
-            $incident.impactedServices
-        } else {
-            @($incident.impactedServices)
+    foreach ($h in $HealthData) {
+        if ($h.availabilityState -ne 'Available' -and
+            $h.occurredTime -ge $MonthStart -and
+            $h.occurredTime -le $MonthEnd) {
+            $downtimeMinutes += 30  # conservative 30-min estimate per event
         }
+    }
 
-        foreach ($impact in $impactedServicesArray) {
-            $serviceName = if ($impact.ImpactedService) { $impact.ImpactedService } else { $impact.ServiceName }
-            $impactedRegions = if ($impact.ImpactedRegions) { $impact.ImpactedRegions } else { @() }
+    # ── Check for pre-indexed incident windows ──
+    foreach ($iw in $IncidentWindows) {
+        $incEnd = if ($iw.End) { $iw.End } else { $MonthEnd }
 
-            $regionMatch = $false
-            foreach ($ir in $impactedRegions) {
-                $irName = if ($ir.ImpactedRegion) { $ir.ImpactedRegion } else { $ir }
-                if ($irName -like "*$(if ($RegionDisplayNames[$Region]) { $RegionDisplayNames[$Region] } else { $Region })*" -or $irName -eq $Region) {
-                    $regionMatch = $true
-                    break
-                }
-            }
+        # Quick skip: incident entirely outside this month
+        if ($iw.Start -gt $MonthEnd -or $incEnd -lt $MonthStart) { continue }
 
-            if (-not $regionMatch) { continue }
+        # Clamp to month boundaries
+        $effectiveStart = [datetime]([Math]::Max($iw.Start.Ticks, $MonthStart.Ticks))
+        $effectiveEnd   = [datetime]([Math]::Min($incEnd.Ticks, $MonthEnd.Ticks))
 
-            $serviceMatch = $false
-            foreach ($svcName in $relevantServiceNames) {
-                if ($serviceName -like "*$svcName*") {
-                    $serviceMatch = $true
-                    break
-                }
-            }
-
-            if (-not $serviceMatch) { continue }
-
-            # Calculate actual downtime from incident window
-            $incStart = [datetime]$incident.impactStartTime
-            $incEnd   = if ($incident.impactEndTime) { [datetime]$incident.impactEndTime } else { $MonthEnd }
-
-            # Clamp to month boundaries
-            $effectiveStart = [datetime]([Math]::Max($incStart.Ticks, $MonthStart.Ticks))
-            $effectiveEnd   = [datetime]([Math]::Min($incEnd.Ticks, $MonthEnd.Ticks))
-
-            if ($effectiveEnd -gt $effectiveStart) {
-                $downtimeMinutes += ($effectiveEnd - $effectiveStart).TotalMinutes
-            }
+        if ($effectiveEnd -gt $effectiveStart) {
+            $downtimeMinutes += ($effectiveEnd - $effectiveStart).TotalMinutes
         }
     }
 
