@@ -888,17 +888,42 @@ function Build-SLAMatrix {
     $serviceCategories = @('Compute', 'SQL DB', 'Web Apps', 'Storage')
     $slaRows = [System.Collections.Generic.List[object]]::new()
 
-    # ── Pre-index health data by region|category for O(1) lookup ────────
+    # ── Pre-index health data by region|category|month for O(1) lookup ──
     Write-Host "[INFO ] Pre-indexing health data..." -ForegroundColor Gray
-    $healthIndex = @{}
-    foreach ($h in $HealthData) {
-        $key = "$($h.location)|$($h.ServiceCategory)"
-        if (-not $healthIndex.ContainsKey($key)) {
-            $healthIndex[$key] = [System.Collections.Generic.List[object]]::new()
-        }
-        $healthIndex[$key].Add($h)
+
+    # Pre-compute month boundaries once (used throughout)
+    $monthBoundaries = [System.Collections.Generic.List[object]]::new()
+    for ($i = $MonthsBack - 1; $i -ge 0; $i--) {
+        $ms = (Get-Date).AddMonths(-$i).Date
+        $ms = Get-Date -Year $ms.Year -Month $ms.Month -Day 1
+        $me = $ms.AddMonths(1).AddSeconds(-1)
+        $monthBoundaries.Add(@{
+            Label = $ms.ToString("MMM yyyy")
+            Start = $ms
+            End   = $me
+            Key   = $ms.ToString("yyyy-MM")
+        })
     }
-    Write-Host "[INFO ] Health index: $($healthIndex.Count) region|category groups from $($HealthData.Count) records" -ForegroundColor Gray
+
+    # healthIndex: key = "region|category|yyyy-MM" → count of unhealthy events
+    $healthIndex = @{}
+    $healthTotal = 0
+    foreach ($h in $HealthData) {
+        if ($h.availabilityState -eq 'Available') { continue }
+        if ($null -eq $h.occurredTime) { continue }
+        $healthTotal++
+
+        $rcBase = "$($h.location)|$($h.ServiceCategory)"
+        $monthKey = ([datetime]$h.occurredTime).ToString("yyyy-MM")
+        $fullKey  = "$rcBase|$monthKey"
+
+        if ($healthIndex.ContainsKey($fullKey)) {
+            $healthIndex[$fullKey]++
+        } else {
+            $healthIndex[$fullKey] = 1
+        }
+    }
+    Write-Host "[INFO ] Health index: $healthTotal unhealthy events binned into $($healthIndex.Count) region|category|month buckets (from $($HealthData.Count) total records)" -ForegroundColor Gray
 
     # ── Pre-index resource counts by region|category ────────────────────
     $resourceCountIndex = @{}
@@ -920,7 +945,7 @@ function Build-SLAMatrix {
         'Storage'  = @('Storage', 'Storage Accounts')
     }
 
-    # incidentIndex: key = "region|category" → list of @{ Start; End }
+    # incidentIndex: key = "region|category|yyyy-MM" → list of @{ Start; End }
     $incidentIndex = @{}
     foreach ($incident in $Incidents) {
         if ($null -eq $incident.impactedServices) { continue }
@@ -961,22 +986,28 @@ function Build-SLAMatrix {
             }
             if ($matchedRegions.Count -eq 0) { continue }
 
-            # Add the incident window to each matching region|category
+            # Add the incident window to each matching region|category|month
             $incStart = [datetime]$incident.impactStartTime
             $incEnd   = if ($incident.impactEndTime) { [datetime]$incident.impactEndTime } else { $null }
 
             foreach ($mr in $matchedRegions) {
                 foreach ($mc in $matchedCategories) {
-                    $iKey = "$mr|$mc"
-                    if (-not $incidentIndex.ContainsKey($iKey)) {
-                        $incidentIndex[$iKey] = [System.Collections.Generic.List[object]]::new()
+                    $rcBase = "$mr|$mc"
+                    # Bin into each month this incident overlaps
+                    foreach ($mb in $monthBoundaries) {
+                        $iwEnd = if ($incEnd) { $incEnd } else { $mb.End }
+                        if ($incStart -gt $mb.End -or $iwEnd -lt $mb.Start) { continue }
+                        $fullKey = "$rcBase|$($mb.Key)"
+                        if (-not $incidentIndex.ContainsKey($fullKey)) {
+                            $incidentIndex[$fullKey] = [System.Collections.Generic.List[object]]::new()
+                        }
+                        $incidentIndex[$fullKey].Add(@{ Start = $incStart; End = $incEnd })
                     }
-                    $incidentIndex[$iKey].Add(@{ Start = $incStart; End = $incEnd })
                 }
             }
         }
     }
-    Write-Host "[INFO ] Incident index: $($incidentIndex.Count) region|category groups" -ForegroundColor Gray
+    Write-Host "[INFO ] Incident index: $($incidentIndex.Count) region|category|month buckets" -ForegroundColor Gray
 
     # ── Build SLA rows with progress tracking ───────────────────────────
     $totalCells   = $TargetRegions.Count * $serviceCategories.Count
@@ -990,8 +1021,9 @@ function Build-SLAMatrix {
         foreach ($category in $serviceCategories) {
             $cellsDone++
             $pct = [int][Math]::Min(100, ($cellsDone / $totalCells) * 100)
+            $elapsed = $swMatrix.Elapsed
             Write-Progress -Id $progressId `
-                -Activity "Building SLA matrix ($cellsDone/$totalCells)" `
+                -Activity "Building SLA matrix ($cellsDone/$totalCells) — elapsed $([Math]::Round($elapsed.TotalSeconds,0))s" `
                 -Status "$regionDisplay — $category" `
                 -PercentComplete $pct
 
@@ -1006,26 +1038,31 @@ function Build-SLAMatrix {
 
             $row['Resource Count'] = $resourceCount
 
-            # Get pre-indexed health data and incidents for this region/category
-            $regionCategoryHealth    = if ($healthIndex.ContainsKey($rcKey))    { $healthIndex[$rcKey] }    else { @() }
-            $regionCategoryIncidents = if ($incidentIndex.ContainsKey($rcKey))  { $incidentIndex[$rcKey] }  else { @() }
+            # Build month columns using pre-computed boundaries and pre-binned data
+            foreach ($mb in $monthBoundaries) {
+                if ($resourceCount -eq 0) {
+                    $row[$mb.Label] = "N/A"
+                    continue
+                }
 
-            # Build month columns
-            for ($i = $MonthsBack - 1; $i -ge 0; $i--) {
-                $monthStart = (Get-Date).AddMonths(-$i).Date
-                $monthStart = Get-Date -Year $monthStart.Year -Month $monthStart.Month -Day 1
-                $monthEnd   = $monthStart.AddMonths(1).AddSeconds(-1)
-                $monthLabel = $monthStart.ToString("MMM yyyy")
+                $fullKey = "$rcKey|$($mb.Key)"
+                $unhealthyCount   = if ($healthIndex.ContainsKey($fullKey))   { $healthIndex[$fullKey] }   else { 0 }
+                $monthIncidents   = if ($incidentIndex.ContainsKey($fullKey)) { $incidentIndex[$fullKey] } else { @() }
 
-                # Calculate availability for this month
-                $availability = Calculate-MonthlyAvailability `
-                    -HealthData $regionCategoryHealth `
-                    -IncidentWindows $regionCategoryIncidents `
-                    -MonthStart $monthStart `
-                    -MonthEnd $monthEnd `
-                    -ResourceCount $resourceCount
+                $totalMinutes    = ($mb.End - $mb.Start).TotalMinutes
+                $downtimeMinutes = $unhealthyCount * 30  # conservative 30-min per event
 
-                $row[$monthLabel] = $availability
+                foreach ($iw in $monthIncidents) {
+                    $iwEnd = if ($iw.End) { $iw.End } else { $mb.End }
+                    $effectiveStart = [datetime]([Math]::Max($iw.Start.Ticks, $mb.Start.Ticks))
+                    $effectiveEnd   = [datetime]([Math]::Min($iwEnd.Ticks,    $mb.End.Ticks))
+                    if ($effectiveEnd -gt $effectiveStart) {
+                        $downtimeMinutes += ($effectiveEnd - $effectiveStart).TotalMinutes
+                    }
+                }
+
+                $downtimeMinutes = [Math]::Min($downtimeMinutes, $totalMinutes)
+                $row[$mb.Label]  = [Math]::Round((($totalMinutes - $downtimeMinutes) / $totalMinutes) * 100, 4)
             }
 
             $slaRows.Add([PSCustomObject]$row)
@@ -1036,63 +1073,6 @@ function Build-SLAMatrix {
     $swMatrix.Stop()
     Write-Host "[  OK  ] SLA matrix built: $($slaRows.Count) rows in $([Math]::Round($swMatrix.Elapsed.TotalSeconds, 1))s" -ForegroundColor Green
     return $slaRows
-}
-
-function Calculate-MonthlyAvailability {
-    <#
-    .SYNOPSIS
-        Calculates the availability percentage for a given region, service category,
-        and month based on pre-indexed health data and incident windows.
-    #>
-    [CmdletBinding()]
-    param(
-        [array]$HealthData,
-        [array]$IncidentWindows,
-        [datetime]$MonthStart,
-        [datetime]$MonthEnd,
-        [int]$ResourceCount
-    )
-
-    # If no resources exist for this category, return N/A
-    if ($ResourceCount -eq 0) {
-        return "N/A"
-    }
-
-    $totalMinutesInMonth = ($MonthEnd - $MonthStart).TotalMinutes
-    $downtimeMinutes = 0
-
-    # ── Check for unavailable health records in this period ──
-    # HealthData is already pre-filtered to this region+category by caller
-    foreach ($h in $HealthData) {
-        if ($h.availabilityState -ne 'Available' -and
-            $h.occurredTime -ge $MonthStart -and
-            $h.occurredTime -le $MonthEnd) {
-            $downtimeMinutes += 30  # conservative 30-min estimate per event
-        }
-    }
-
-    # ── Check for pre-indexed incident windows ──
-    foreach ($iw in $IncidentWindows) {
-        $incEnd = if ($iw.End) { $iw.End } else { $MonthEnd }
-
-        # Quick skip: incident entirely outside this month
-        if ($iw.Start -gt $MonthEnd -or $incEnd -lt $MonthStart) { continue }
-
-        # Clamp to month boundaries
-        $effectiveStart = [datetime]([Math]::Max($iw.Start.Ticks, $MonthStart.Ticks))
-        $effectiveEnd   = [datetime]([Math]::Min($incEnd.Ticks, $MonthEnd.Ticks))
-
-        if ($effectiveEnd -gt $effectiveStart) {
-            $downtimeMinutes += ($effectiveEnd - $effectiveStart).TotalMinutes
-        }
-    }
-
-    # Cap downtime to total minutes in month
-    $downtimeMinutes = [Math]::Min($downtimeMinutes, $totalMinutesInMonth)
-
-    # Calculate availability percentage
-    $availability = (($totalMinutesInMonth - $downtimeMinutes) / $totalMinutesInMonth) * 100
-    return [Math]::Round($availability, 4)
 }
 
 function Build-IncidentsTable {
