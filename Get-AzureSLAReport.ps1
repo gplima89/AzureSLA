@@ -307,7 +307,7 @@ function Invoke-PaginatedGraphQuery {
         $subBatchIndex++
         $subBatchPrefix = if ($subBatches.Count -gt 1) { "Sub-batch $subBatchIndex/$($subBatches.Count): " } else { "" }
 
-        # ── 1. Count query ──────────────────────────────────────────────
+        # ── 1. Count query (informational only — never skip based on count) ─
         $countQuery = @"
 $Query
 | count
@@ -316,14 +316,30 @@ $Query
         try {
             $countResult = Search-AzGraph -Query $countQuery -First 1 `
                 -Subscription $subBatch -ErrorAction Stop
-            $totalCount = [int]($countResult | Select-Object -ExpandProperty Count_ -ErrorAction SilentlyContinue)
-            if (-not $totalCount) { $totalCount = [int]($countResult.Count_) }
-            Write-Host "[INFO ] ${subBatchPrefix}Total $Label to retrieve: $totalCount" -ForegroundColor Cyan
+
+            # Try multiple property name patterns (varies by Az.ResourceGraph version)
+            $totalCount = -1
+            foreach ($propName in @('Count_', 'count_', 'Count')) {
+                $val = $countResult | Select-Object -ExpandProperty $propName -ErrorAction SilentlyContinue
+                if ($null -ne $val -and $val -is [int] -or $val -is [long]) {
+                    $totalCount = [int]$val
+                    break
+                }
+            }
+            # Fallback: try direct property access
+            if ($totalCount -lt 0) {
+                if ($null -ne $countResult.Count_)  { $totalCount = [int]$countResult.Count_ }
+                elseif ($null -ne $countResult.count_) { $totalCount = [int]$countResult.count_ }
+            }
+
+            if ($totalCount -ge 0) {
+                Write-Host "[INFO ] ${subBatchPrefix}Total $Label to retrieve: $totalCount" -ForegroundColor Cyan
+            } else {
+                Write-Host "[WARN ] ${subBatchPrefix}Could not parse count — will paginate until exhausted." -ForegroundColor Yellow
+            }
         } catch {
             Write-Host "[WARN ] ${subBatchPrefix}Count query failed — will paginate until exhausted." -ForegroundColor Yellow
         }
-
-        if ($totalCount -eq 0) { continue }
 
         # ── 2. Paginated fetch ──────────────────────────────────────────
         $skip      = 0
