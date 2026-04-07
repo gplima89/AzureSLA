@@ -2,6 +2,51 @@
 
 All notable changes to the Azure SLA & Service Health Report Generator are documented in this file.
 
+## [2.0.0] — 2026-04-07
+
+### Added
+
+- **REST API for Activity Log** — `Get-ServiceHealthAlerts` now uses `Invoke-AzRestMethod` instead of `Set-AzContext`/`Get-AzActivityLog` loops, dramatically reducing query time for large environments.
+- **Parallel API calls (PowerShell 7+)** — Activity Log queries run in parallel across subscriptions using `ForEach-Object -Parallel` with `-ThrottleLimit 10`. Falls back to sequential on PowerShell 5.1.
+- **Progress bars** — Real-time `Write-Progress` bars for both parallel API calls and SLA matrix building, using `[powershell]::Create().BeginInvoke()` async pattern with `ConcurrentDictionary` tracking.
+- **Low-SLA diagnostics** — `[DIAG]` logging emitted to console for any cell with SLA ≤ 50%, showing the breakdown of health events, incidents, and merged windows.
+- **Interval merge algorithm** — Overlapping incident time windows are now merged before calculating downtime, preventing the same time period from being counted twice.
+- **Comprehensive README** — Full rewrite with sections for non-technical users: metric calculation methodology, results interpretation guide, analysis guidance, data accuracy disclaimer, and step-by-step requirements.
+
+### Changed
+
+- **Subscription batching** — `Invoke-PaginatedGraphQuery` now batches subscriptions in groups of 200 (Azure Resource Graph limit) instead of passing all at once.
+- **O(n²) array elimination** — All `+=` array concatenation patterns replaced with `[System.Collections.Generic.List[object]]` and `.Add()` for O(1) appends.
+- **Pre-indexed health data** — Health events and incidents pre-binned into hashtables keyed by `region|category|yyyy-MM` for O(1) lookups during SLA matrix building, replacing per-cell iteration over all events.
+- **Month boundaries pre-computed** — Start/end dates and total minutes for each month calculated once upfront instead of per-cell.
+- **Weighted health downtime** — Changed from flat 30 minutes per unhealthy event to weighted fraction: `min(1, unhealthy/total) × 30 minutes`, correctly scaling impact by fleet size.
+- **Incident window cap** — Each merged incident window is capped at 4 hours (240 minutes) since tracking windows represent investigation periods, not continuous outage.
+- **ServiceIssue-only filtering** — Only `ServiceIssue` events count toward SLA downtime. `PlannedMaintenance`, `HealthAdvisory`, and `SecurityAdvisory` events are excluded from availability calculations (still shown in Tabs 2 and 3).
+- **Active incident handling** — Incidents with `Active` status and no end time now use `lastUpdateTime` as a proxy end, instead of spanning to the end of each month.
+
+### Fixed
+
+- **N/A for all SLAs** — Count query returning `$null` was cast to `[int]0`, triggering `if ($totalCount -eq 0) { continue }` which skipped all data fetching. Removed the premature skip; count is now informational only.
+- **0% SLA from overlapping incidents** — Multiple overlapping incident windows were double-counted. Fixed with interval merge algorithm (sort by start, extend overlapping windows).
+- **0% SLA from non-ServiceIssue events** — Planned maintenance and health advisories were incorrectly counted as downtime. Now filtered to `ServiceIssue` only.
+- **0% SLA from Active incidents** — Active incidents with no end time used month-end as fallback, creating full-month downtime across multiple months.
+- **0% SLA from excessive health events** — Flat `unhealthyCount × 30min` with thousands of events exceeded total month minutes. Fixed with weighted fraction.
+- **0% SLA from long tracking windows** — Single incidents tracked across multiple months (e.g., Jan→Apr) produced full-month downtime in each month. Fixed by the 4-hour cap per merged window.
+- **Duplicate rows** — Tenant-scoped queries (`servicehealthresources`, `HealthResources`) returned identical results in each subscription batch. Added deduplication: health data by composite key hashtable, incidents/events by `Sort-Object -Property name -Unique`, regions by `Select-Object -Unique`.
+- **Negative duration (-17752462 hours)** — `ImpactMitigationTime` with ticks = 0 converted to `DateTime 0001-01-01`. `Convert-TicksToDateTime` now returns `$null` for ticks ≤ 0 or dates before year 2000.
+- **Robust count parsing** — `Invoke-PaginatedGraphQuery` no longer fails silently when the count query returns unexpected formats.
+
+## [1.3.1] — 2026-02-11
+
+### Fixed
+
+- **OutputPath directory handling** — Auto-appends the default filename when `-OutputPath` is a directory instead of a file path.
+- **PowerShell 5.1 here-string syntax** — Fixed here-string formatting that caused parse errors on Windows PowerShell 5.1.
+
+### Added
+
+- **Azure Workbook template** — `AzureSLA.workbook.json` added (in testing).
+
 ## [1.3.0] — 2026-02-11
 
 ### Added

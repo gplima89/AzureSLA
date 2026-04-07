@@ -20,8 +20,8 @@
 
 .NOTES
     Author  : Guil Lima (Microsoft)
-    Date    : 2026-02-11
-    Version : 1.1
+    Date    : 2026-04-07
+    Version : 2.0.0
 #>
 
 [CmdletBinding()]
