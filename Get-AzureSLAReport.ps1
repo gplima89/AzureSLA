@@ -262,7 +262,13 @@ function Convert-TicksToDateTime {
     param([object]$Ticks)
     if ($null -eq $Ticks) { return $null }
     try {
-        return [datetime]::new([long]$Ticks, [System.DateTimeKind]::Utc)
+        $val = [long]$Ticks
+        # Ticks of 0 or near-zero → DateTime.MinValue (0001-01-01) — treat as null
+        if ($val -le 0) { return $null }
+        $dt = [datetime]::new($val, [System.DateTimeKind]::Utc)
+        # Sanity check: dates before 2000 are clearly invalid for Azure events
+        if ($dt.Year -lt 2000) { return $null }
+        return $dt
     } catch {
         return $null
     }
