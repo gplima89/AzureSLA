@@ -1085,27 +1085,66 @@ function Build-SLAMatrix {
 
                 $totalMinutes    = ($mb.End - $mb.Start).TotalMinutes
                 $downtimeMinutes = 0
+                $merged          = $null
 
                 # Health data: each event is per-resource, not per-service.
                 # Calculate as weighted average: (unhealthy resources / total resources) × 30 min
-                # This represents the fraction of the fleet that was affected, spread over the month.
                 if ($unhealthyCount -gt 0) {
                     $affectedFraction = [Math]::Min(1.0, $unhealthyCount / $resourceCount)
                     $downtimeMinutes += $affectedFraction * 30
                 }
+                $healthDowntime = $downtimeMinutes
 
-                # Service health incidents: these are service-level outages, applied directly
-                foreach ($iw in $monthIncidents) {
-                    $iwEnd = if ($iw.End) { $iw.End } else { $mb.End }
-                    $effectiveStart = [datetime]([Math]::Max($iw.Start.Ticks, $mb.Start.Ticks))
-                    $effectiveEnd   = [datetime]([Math]::Min($iwEnd.Ticks,    $mb.End.Ticks))
-                    if ($effectiveEnd -gt $effectiveStart) {
-                        $downtimeMinutes += ($effectiveEnd - $effectiveStart).TotalMinutes
+                # Service health incidents: merge overlapping windows before summing
+                # to avoid double-counting when multiple incidents overlap in time.
+                if ($monthIncidents.Count -gt 0) {
+                    # Clamp all windows to month boundaries and collect
+                    $clampedWindows = [System.Collections.Generic.List[object]]::new()
+                    foreach ($iw in $monthIncidents) {
+                        $iwEnd = if ($iw.End) { $iw.End } else { $mb.End }
+                        $s = [datetime]([Math]::Max($iw.Start.Ticks, $mb.Start.Ticks))
+                        $e = [datetime]([Math]::Min($iwEnd.Ticks,    $mb.End.Ticks))
+                        if ($e -gt $s) {
+                            $clampedWindows.Add(@{ S = $s; E = $e })
+                        }
+                    }
+
+                    # Sort by start time, then merge overlapping intervals
+                    if ($clampedWindows.Count -gt 0) {
+                        $sorted = $clampedWindows | Sort-Object { $_.S }
+                        $merged = [System.Collections.Generic.List[object]]::new()
+                        $cur = $sorted[0]
+                        for ($wi = 1; $wi -lt $sorted.Count; $wi++) {
+                            $nxt = $sorted[$wi]
+                            if ($nxt.S -le $cur.E) {
+                                # Overlapping or adjacent — extend current window
+                                if ($nxt.E -gt $cur.E) { $cur = @{ S = $cur.S; E = $nxt.E } }
+                            } else {
+                                $merged.Add($cur)
+                                $cur = $nxt
+                            }
+                        }
+                        $merged.Add($cur)
+
+                        $incidentDowntime = 0
+                        foreach ($mw in $merged) {
+                            $incidentDowntime += ($mw.E - $mw.S).TotalMinutes
+                        }
+                        $downtimeMinutes += $incidentDowntime
                     }
                 }
 
                 $downtimeMinutes = [Math]::Min($downtimeMinutes, $totalMinutes)
-                $row[$mb.Label]  = [Math]::Round((($totalMinutes - $downtimeMinutes) / $totalMinutes) * 100, 4)
+                $slaValue = [Math]::Round((($totalMinutes - $downtimeMinutes) / $totalMinutes) * 100, 4)
+
+                # ── Diagnostic: log cells with very low SLA ──
+                if ($slaValue -le 50 -and $resourceCount -gt 0) {
+                    $incCount   = $monthIncidents.Count
+                    $mergedCount = if ($merged) { $merged.Count } else { 0 }
+                    Write-Host "[DIAG ] LOW SLA $slaValue% — $regionDisplay | $category | $($mb.Label) — resources: $resourceCount, healthEvents: $unhealthyCount (${healthDowntime}min), incidents: $incCount→${mergedCount} merged ($([Math]::Round($downtimeMinutes - $healthDowntime, 1))min), total downtime: $([Math]::Round($downtimeMinutes, 1))/$([Math]::Round($totalMinutes, 0))min" -ForegroundColor Yellow
+                }
+
+                $row[$mb.Label] = $slaValue
             }
 
             $slaRows.Add([PSCustomObject]$row)
