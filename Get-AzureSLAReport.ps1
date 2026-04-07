@@ -225,7 +225,7 @@ Resources
 
     try {
         $regionResults = Invoke-PaginatedGraphQuery -Query $query -Label 'region records'
-        $resolved = $regionResults | ForEach-Object { $_.location.ToLower() }
+        $resolved = @($regionResults | ForEach-Object { $_.location.ToLower() } | Select-Object -Unique)
 
         if ($resolved.Count -eq 0) {
             Write-Host "[WARN ] No resources found in any region. Falling back to all Azure regions." -ForegroundColor Yellow
@@ -423,6 +423,15 @@ servicehealthresources
 
     try {
         $raw = Invoke-PaginatedGraphQuery -Query $query -Label 'health events'
+
+        # Deduplicate: servicehealthresources is tenant-scoped, so subscription batching returns duplicates
+        if ($raw.Count -gt 0) {
+            $rawBefore = $raw.Count
+            $raw = @($raw | Sort-Object -Property name -Unique)
+            if ($raw.Count -lt $rawBefore) {
+                Write-Host "[INFO ] Deduplicated health events (from $rawBefore to $($raw.Count)) by tracking ID" -ForegroundColor Gray
+            }
+        }
 
         # Convert ticks → DateTime and filter by date range in PowerShell
         $results = foreach ($r in $raw) {
@@ -803,6 +812,25 @@ HealthResources
 
     try {
         $healthData = Invoke-PaginatedGraphQuery -Query $query -Label 'availability records'
+
+        # Deduplicate: HealthResources is tenant-scoped, so subscription batching returns duplicates
+        if ($healthData.Count -gt 0) {
+            $seen = @{}
+            $unique = [System.Collections.Generic.List[object]]::new()
+            foreach ($h in $healthData) {
+                $key = "$($h.resourceId)|$($h.availabilityState)|$($h.occurredTime)"
+                if (-not $seen.ContainsKey($key)) {
+                    $seen[$key] = $true
+                    $unique.Add($h)
+                }
+            }
+            $dupeCount = $healthData.Count - $unique.Count
+            if ($dupeCount -gt 0) {
+                Write-Host "[INFO ] Deduplicated $dupeCount availability records (from $($healthData.Count) to $($unique.Count))" -ForegroundColor Gray
+            }
+            $healthData = $unique.ToArray()
+        }
+
         Write-Host "[  OK  ] Retrieved $($healthData.Count) availability records" -ForegroundColor Green
         return $healthData
     } catch {
@@ -842,6 +870,15 @@ servicehealthresources
 
     try {
         $raw = Invoke-PaginatedGraphQuery -Query $query -Label 'service health incidents'
+
+        # Deduplicate: servicehealthresources is tenant-scoped, so subscription batching returns duplicates
+        if ($raw.Count -gt 0) {
+            $rawBefore = $raw.Count
+            $raw = @($raw | Sort-Object -Property name -Unique)
+            if ($raw.Count -lt $rawBefore) {
+                Write-Host "[INFO ] Deduplicated service health incidents (from $rawBefore to $($raw.Count)) by tracking ID" -ForegroundColor Gray
+            }
+        }
 
         # Convert ticks → DateTime and filter by date range in PowerShell
         $incidents = foreach ($r in $raw) {
@@ -1095,8 +1132,14 @@ function Build-SLAMatrix {
                 }
                 $healthDowntime = $downtimeMinutes
 
-                # Service health incidents: merge overlapping windows before summing
-                # to avoid double-counting when multiple incidents overlap in time.
+                # Service health incidents: merge overlapping windows, then cap each
+                # merged window's contribution. Incident tracking windows represent the
+                # investigation period, NOT continuous downtime. The actual outage is
+                # typically a fraction of the window. We cap each merged window at 4 hours
+                # (240 min) — the real per-resource impact is already captured by HealthResources.
+                $maxDowntimePerIncidentMinutes = 240  # 4 hours cap per merged window
+                $incidentDowntime = 0
+
                 if ($monthIncidents.Count -gt 0) {
                     # Clamp all windows to month boundaries and collect
                     $clampedWindows = [System.Collections.Generic.List[object]]::new()
@@ -1126,9 +1169,10 @@ function Build-SLAMatrix {
                         }
                         $merged.Add($cur)
 
-                        $incidentDowntime = 0
                         foreach ($mw in $merged) {
-                            $incidentDowntime += ($mw.E - $mw.S).TotalMinutes
+                            $windowMinutes = ($mw.E - $mw.S).TotalMinutes
+                            # Cap each merged window — tracking period ≠ actual downtime
+                            $incidentDowntime += [Math]::Min($windowMinutes, $maxDowntimePerIncidentMinutes)
                         }
                         $downtimeMinutes += $incidentDowntime
                     }
@@ -1139,9 +1183,9 @@ function Build-SLAMatrix {
 
                 # ── Diagnostic: log cells with very low SLA ──
                 if ($slaValue -le 50 -and $resourceCount -gt 0) {
-                    $incCount   = $monthIncidents.Count
+                    $incCount    = $monthIncidents.Count
                     $mergedCount = if ($merged) { $merged.Count } else { 0 }
-                    Write-Host "[DIAG ] LOW SLA $slaValue% — $regionDisplay | $category | $($mb.Label) — resources: $resourceCount, healthEvents: $unhealthyCount (${healthDowntime}min), incidents: $incCount→${mergedCount} merged ($([Math]::Round($downtimeMinutes - $healthDowntime, 1))min), total downtime: $([Math]::Round($downtimeMinutes, 1))/$([Math]::Round($totalMinutes, 0))min" -ForegroundColor Yellow
+                    Write-Host "[DIAG ] LOW SLA $slaValue% — $regionDisplay | $category | $($mb.Label) — resources: $resourceCount, healthEvents: $unhealthyCount (${healthDowntime}min), incidents: $incCount→${mergedCount} merged (capped ${incidentDowntime}min), total downtime: $([Math]::Round($downtimeMinutes, 1))/$([Math]::Round($totalMinutes, 0))min" -ForegroundColor Yellow
                 }
 
                 $row[$mb.Label] = $slaValue
