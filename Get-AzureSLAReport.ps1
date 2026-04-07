@@ -947,8 +947,39 @@ function Build-SLAMatrix {
 
     # incidentIndex: key = "region|category|yyyy-MM" → list of @{ Start; End }
     $incidentIndex = @{}
+    $skippedNonServiceIssue = 0
+    $skippedActive          = 0
+    $indexedIncidents       = 0
+
     foreach ($incident in $Incidents) {
         if ($null -eq $incident.impactedServices) { continue }
+
+        # Only count actual service outages for SLA — not maintenance, advisories, or security notices
+        if ($incident.eventType -and $incident.eventType -ne 'ServiceIssue') {
+            $skippedNonServiceIssue++
+            continue
+        }
+
+        # Determine the effective end time
+        $incStart = [datetime]$incident.impactStartTime
+        $incEnd   = $null
+        if ($incident.impactEndTime) {
+            $incEnd = [datetime]$incident.impactEndTime
+        } elseif ($incident.status -eq 'Active') {
+            # Active/ongoing incidents: use lastUpdateTime as a conservative proxy end,
+            # or skip entirely — they don't have a confirmed outage window yet.
+            if ($incident.lastUpdateTime) {
+                $incEnd = [datetime]$incident.lastUpdateTime
+            } else {
+                # No end time and no update time — skip to avoid inflating downtime
+                $skippedActive++
+                continue
+            }
+        }
+        # If resolved but no end time (rare), use start + 1 hour as conservative estimate
+        if ($null -eq $incEnd) {
+            $incEnd = $incStart.AddHours(1)
+        }
 
         $impactedServicesArray = if ($incident.impactedServices -is [array]) {
             $incident.impactedServices
@@ -987,16 +1018,13 @@ function Build-SLAMatrix {
             if ($matchedRegions.Count -eq 0) { continue }
 
             # Add the incident window to each matching region|category|month
-            $incStart = [datetime]$incident.impactStartTime
-            $incEnd   = if ($incident.impactEndTime) { [datetime]$incident.impactEndTime } else { $null }
-
+            $indexedIncidents++
             foreach ($mr in $matchedRegions) {
                 foreach ($mc in $matchedCategories) {
                     $rcBase = "$mr|$mc"
                     # Bin into each month this incident overlaps
                     foreach ($mb in $monthBoundaries) {
-                        $iwEnd = if ($incEnd) { $incEnd } else { $mb.End }
-                        if ($incStart -gt $mb.End -or $iwEnd -lt $mb.Start) { continue }
+                        if ($incStart -gt $mb.End -or $incEnd -lt $mb.Start) { continue }
                         $fullKey = "$rcBase|$($mb.Key)"
                         if (-not $incidentIndex.ContainsKey($fullKey)) {
                             $incidentIndex[$fullKey] = [System.Collections.Generic.List[object]]::new()
@@ -1007,7 +1035,13 @@ function Build-SLAMatrix {
             }
         }
     }
-    Write-Host "[INFO ] Incident index: $($incidentIndex.Count) region|category|month buckets" -ForegroundColor Gray
+    Write-Host "[INFO ] Incident index: $($incidentIndex.Count) region|category|month buckets ($indexedIncidents service issues indexed)" -ForegroundColor Gray
+    if ($skippedNonServiceIssue -gt 0) {
+        Write-Host "[INFO ] Skipped $skippedNonServiceIssue non-ServiceIssue events (maintenance/advisories) — not counted as downtime" -ForegroundColor Gray
+    }
+    if ($skippedActive -gt 0) {
+        Write-Host "[WARN ] Skipped $skippedActive active incidents without end/update time — excluded from SLA calculation" -ForegroundColor Yellow
+    }
 
     # ── Build SLA rows with progress tracking ───────────────────────────
     $totalCells   = $TargetRegions.Count * $serviceCategories.Count
