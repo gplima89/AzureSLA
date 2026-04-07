@@ -1084,8 +1084,17 @@ function Build-SLAMatrix {
                 $monthIncidents   = if ($incidentIndex.ContainsKey($fullKey)) { $incidentIndex[$fullKey] } else { @() }
 
                 $totalMinutes    = ($mb.End - $mb.Start).TotalMinutes
-                $downtimeMinutes = $unhealthyCount * 30  # conservative 30-min per event
+                $downtimeMinutes = 0
 
+                # Health data: each event is per-resource, not per-service.
+                # Calculate as weighted average: (unhealthy resources / total resources) × 30 min
+                # This represents the fraction of the fleet that was affected, spread over the month.
+                if ($unhealthyCount -gt 0) {
+                    $affectedFraction = [Math]::Min(1.0, $unhealthyCount / $resourceCount)
+                    $downtimeMinutes += $affectedFraction * 30
+                }
+
+                # Service health incidents: these are service-level outages, applied directly
                 foreach ($iw in $monthIncidents) {
                     $iwEnd = if ($iw.End) { $iw.End } else { $mb.End }
                     $effectiveStart = [datetime]([Math]::Max($iw.Start.Ticks, $mb.Start.Ticks))
