@@ -2,6 +2,20 @@
 
 All notable changes to the Azure SLA & Service Health Report Generator are documented in this file.
 
+## [2.1.0] — 2026-04-08
+
+### Added
+
+- **Azure Blob Storage upload** — New `-BlobContainerUrl` parameter to upload the generated report to an Azure Storage blob container via azcopy. Works both locally and from Azure Cloud Shell.
+  - Supports plain URLs (with Azure CLI / `azcopy login` auth) and SAS token URLs
+  - Validates azcopy is installed before attempting upload (only when parameter is used)
+  - Pre-upload access validation against the blob container with detailed troubleshooting guidance
+  - Required role: `Storage Blob Data Contributor` on the storage account, or a SAS token with write + create permissions
+- **`.gitignore`** — Prevents `.xlsx` report files from being committed to the repository.
+- **Azure Cloud Shell support** — `Invoke-Item` is skipped when running in Cloud Shell; download instructions shown instead.
+- **MIT license and disclaimer in script header** — Visible at the top of the `.ps1` file for anyone running the code.
+- **Detailed SLA Calculation section in README** — Technical deep-dive into the availability formula, data sources, and edge cases.
+
 ## [2.0.0] — 2026-04-07
 
 ### Added

@@ -136,6 +136,7 @@ If a cell shows **N/A**, it means you have **zero resources** of that service ty
 | **PowerShell 7+** | Recommended. Download from [https://aka.ms/powershell](https://aka.ms/powershell). Windows PowerShell 5.1 also works but parallel API calls (faster for large environments) require PowerShell 7+. |
 | **Internet access** | The script connects to Azure APIs — your machine must be able to reach `https://management.azure.com` and `https://login.microsoftonline.com`. |
 | **No Excel needed** | The report is generated using the `ImportExcel` module, which creates `.xlsx` files without requiring Microsoft Excel to be installed. You'll need Excel (or a compatible viewer) only to **open** the report. |
+| **azcopy** *(optional)* | Only required if you use `-BlobContainerUrl` to upload the report to Azure Blob Storage. Pre-installed in Azure Cloud Shell. Download from [https://aka.ms/azcopy](https://aka.ms/azcopy). |
 
 ### PowerShell Modules
 
@@ -236,6 +237,12 @@ The Excel file opens automatically. Start with the **SLA Overview** tab to see t
     -SubscriptionIds @("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee") `
     -MonthsBack 6 `
     -OutputPath "C:\Reports\MySLAReport.xlsx"
+
+# Upload the report to Azure Blob Storage (plain URL — requires Azure CLI auth)
+.\Get-AzureSLAReport.ps1 -BlobContainerUrl "https://mystorageaccount.blob.core.windows.net/reports"
+
+# Upload with a SAS token (no Azure CLI needed)
+.\Get-AzureSLAReport.ps1 -BlobContainerUrl "https://mystorageaccount.blob.core.windows.net/reports?sv=2022-11-02&ss=b&srt=o&sp=wc&se=2026-12-31T00:00:00Z&sig=..."
 ```
 
 ### Parameters Reference
@@ -246,6 +253,58 @@ The Excel file opens automatically. Start with the **SLA Overview** tab to see t
 | `-MonthsBack` | `int` | `12` | How many months of history to include |
 | `-OutputPath` | `string` | Script folder | Full path for the output `.xlsx` file |
 | `-SubscriptionIds` | `string[]` | All enabled subscriptions | Specific subscription IDs to include |
+| `-BlobContainerUrl` | `string` | *(none)* | Azure Blob Storage container URL to upload the report via azcopy. Accepts a plain URL or a URL with SAS token. |
+
+---
+
+## Uploading the Report to Azure Blob Storage
+
+Use the `-BlobContainerUrl` parameter to automatically upload the generated report to an Azure Storage blob container. This works both locally and from Azure Cloud Shell.
+
+### Authentication Options
+
+| Method | When to Use | Setup |
+|--------|------------|-------|
+| **Azure CLI credentials** | You have Azure CLI installed and are logged in (`az login`) | Just pass the plain container URL — the script sets `AZCOPY_AUTO_LOGIN_TYPE=AZCLI` automatically |
+| **SAS token** | You don't have Azure CLI, or need to share a one-time upload URL | Append the SAS token to the URL: `https://account.blob.core.windows.net/container?sv=...` |
+| **azcopy login** | You prefer to authenticate azcopy directly | Run `azcopy login` before the script, then pass the plain URL |
+| **Cloud Shell** | Running from Azure Cloud Shell | Azure CLI is pre-installed and authenticated — plain URL works out of the box |
+
+### Required Permissions
+
+If using Azure RBAC (plain URL, no SAS token), you need one of these roles on the **storage account**:
+
+- **Storage Blob Data Contributor** — read, write, and delete blobs
+- **Storage Blob Data Owner** — full control
+
+> **Note**: The generic `Contributor` or `Owner` roles on the subscription are **not** sufficient — Azure Storage requires the specific "Storage Blob Data" roles for data-plane operations.
+
+If using a **SAS token**, ensure it has both **write (w)** and **create (c)** permissions.
+
+### Examples
+
+```powershell
+# Plain URL (Azure CLI auth)
+.\Get-AzureSLAReport.ps1 -BlobContainerUrl "https://mystorageaccount.blob.core.windows.net/sla-reports"
+
+# SAS token URL
+.\Get-AzureSLAReport.ps1 -BlobContainerUrl "https://mystorageaccount.blob.core.windows.net/sla-reports?sv=2022-11-02&ss=b&srt=o&sp=wc&se=2026-12-31T00:00:00Z&sig=..."
+
+# Combine with other parameters
+.\Get-AzureSLAReport.ps1 `
+    -Regions @("canadacentral", "eastus") `
+    -MonthsBack 6 `
+    -BlobContainerUrl "https://mystorageaccount.blob.core.windows.net/sla-reports"
+```
+
+### What Happens
+
+1. The script checks that `azcopy` is installed (error with install instructions if not)
+2. Validates access to the blob container by listing its contents
+3. Uploads the `.xlsx` report to the container
+4. Shows success/failure in the summary output
+
+If the upload fails, the report is still saved locally — you won't lose data.
 
 ---
 

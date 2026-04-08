@@ -58,8 +58,8 @@ DISCLAIMER:
 
 .NOTES
     Author  : Guil Lima (Microsoft)
-    Date    : 2026-04-07
-    Version : 2.0.0
+    Date    : 2026-04-08
+    Version : 2.1.0
 #>
 
 [CmdletBinding()]
@@ -70,7 +70,12 @@ param(
     [string]$OutputPath = (Join-Path $PSScriptRoot "AzureSLA_Report_$(Get-Date -Format 'yyyyMMdd_HHmmss').xlsx"),
 
     # Subscription scope: pass one or more subscription IDs, or leave empty for ALL subscriptions
-    [string[]]$SubscriptionIds = @()
+    [string[]]$SubscriptionIds = @(),
+
+    # Optional: upload report to Azure Blob Storage container via azcopy
+    # Plain URL (requires 'azcopy login' or Azure CLI auth): https://account.blob.core.windows.net/container
+    # URL with SAS token: https://account.blob.core.windows.net/container?sv=2022-11-02&ss=b&srt=o&sp=wc...
+    [string]$BlobContainerUrl = ""
 )
 
 # ── Resolve OutputPath: if it's a directory, append the default filename ────
@@ -89,6 +94,129 @@ $HeaderFg       = [System.Drawing.Color]::White
 $GreenBg        = [System.Drawing.Color]::FromArgb(198, 239, 206)
 $YellowBg       = [System.Drawing.Color]::FromArgb(255, 235, 156)
 $RedBg          = [System.Drawing.Color]::FromArgb(255, 199, 206)
+#endregion
+
+#region ── 0b. HELPER: AZURE BLOB STORAGE UPLOAD ────────────────────────────────
+function Upload-ReportToBlob {
+    <#
+    .SYNOPSIS
+        Uploads the generated report to an Azure Blob Storage container via azcopy.
+        Supports plain URLs (Azure CLI / azcopy login auth) and SAS token URLs.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [Parameter(Mandatory)][string]$ContainerUrl
+    )
+
+    Write-Host "`n── Uploading report to Azure Blob Storage ──" -ForegroundColor Cyan
+
+    # ── Check azcopy is installed ───────────────────────────────────────
+    $azcopyCmd = Get-Command 'azcopy' -ErrorAction SilentlyContinue
+    if (-not $azcopyCmd) {
+        $azcopyCmd = Get-Command 'azcopy.exe' -ErrorAction SilentlyContinue
+    }
+    if (-not $azcopyCmd) {
+        Write-Host "[ERROR] azcopy is not installed or not in PATH." -ForegroundColor Red
+        $installMsg = @"
+
+  ╔═══ AZCOPY INSTALLATION ════════════════════════════════════════════╗
+  ║                                                                     ║
+  ║  Download azcopy from: https://aka.ms/azcopy                        ║
+  ║                                                                     ║
+  ║  Windows:  winget install Microsoft.AzCopy                          ║
+  ║  Linux:    curl -L https://aka.ms/downloadazcopy-v10-linux | tar xz ║
+  ║  macOS:    brew install azcopy                                      ║
+  ║  Cloud Shell: azcopy is pre-installed                               ║
+  ║                                                                     ║
+  ╚═════════════════════════════════════════════════════════════════════╝
+"@
+        Write-Host $installMsg -ForegroundColor Yellow
+        return $false
+    }
+    Write-Host "[  OK  ] azcopy found: $($azcopyCmd.Source)" -ForegroundColor Green
+
+    # ── Configure authentication ────────────────────────────────────────
+    $hasSasToken = $ContainerUrl -match '\?'
+    $savedAutoLogin = $env:AZCOPY_AUTO_LOGIN_TYPE
+
+    if (-not $hasSasToken) {
+        # Use Azure CLI credentials for auto-login (works in Cloud Shell and locally with az cli)
+        $env:AZCOPY_AUTO_LOGIN_TYPE = 'AZCLI'
+        Write-Host "[INFO ] No SAS token detected — using Azure CLI credentials for azcopy" -ForegroundColor Cyan
+    } else {
+        Write-Host "[INFO ] SAS token detected in URL — using token-based authentication" -ForegroundColor Cyan
+    }
+
+    try {
+        # ── Validate access to the blob container ───────────────────────
+        Write-Host "[INFO ] Validating access to blob container..." -ForegroundColor Cyan
+        $containerBase = if ($hasSasToken) { $ContainerUrl.Split('?')[0].TrimEnd('/') } else { $ContainerUrl.TrimEnd('/') }
+
+        $listResult = & azcopy list "$ContainerUrl" --running-tally 2>&1
+
+        if ($LASTEXITCODE -ne 0) {
+            $errText = $listResult | Out-String
+            Write-Host "[ERROR] Cannot access the blob container." -ForegroundColor Red
+            $accessMsg = @"
+
+  ╔═══ BLOB STORAGE ACCESS TROUBLESHOOTING ════════════════════════════╗
+  ║                                                                     ║
+  ║  Ensure you have one of the following:                              ║
+  ║                                                                     ║
+  ║  1. Azure RBAC role on the storage account:                         ║
+  ║     • Storage Blob Data Contributor (read/write/delete)             ║
+  ║     • Storage Blob Data Owner (full control)                        ║
+  ║                                                                     ║
+  ║  2. A SAS URL with write (w) and create (c) permissions:            ║
+  ║     -BlobContainerUrl "https://account.blob.core.windows.net/       ║
+  ║       container?sv=2022-11-02&ss=b&srt=o&sp=wc&se=..."             ║
+  ║                                                                     ║
+  ║  3. Run 'azcopy login' before executing this script                 ║
+  ║                                                                     ║
+  ║  4. In Cloud Shell, ensure Azure CLI is authenticated:              ║
+  ║       az login                                                      ║
+  ║                                                                     ║
+  ╚═════════════════════════════════════════════════════════════════════╝
+"@
+            Write-Host $accessMsg -ForegroundColor Yellow
+            Write-Host "[DETAIL] $errText" -ForegroundColor Gray
+            return $false
+        }
+        Write-Host "[  OK  ] Blob container accessible" -ForegroundColor Green
+
+        # ── Upload the report ───────────────────────────────────────────
+        $fileName = [System.IO.Path]::GetFileName($FilePath)
+        if ($hasSasToken) {
+            # Re-attach SAS token to the file-level URL
+            $parts = $ContainerUrl -split '\?', 2
+            $destUrl = "$($parts[0].TrimEnd('/'))/$fileName?$($parts[1])"
+        } else {
+            $destUrl = "$containerBase/$fileName"
+        }
+
+        Write-Host "[INFO ] Uploading $fileName..." -ForegroundColor Cyan
+        $uploadResult = & azcopy copy "$FilePath" "$destUrl" --overwrite=true 2>&1
+
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "[  OK  ] Report uploaded to: $containerBase/$fileName" -ForegroundColor Green
+            return $true
+        } else {
+            $errText = $uploadResult | Out-String
+            Write-Host "[ERROR] Upload failed." -ForegroundColor Red
+            Write-Host "[DETAIL] $errText" -ForegroundColor Gray
+            Write-Host "[INFO ] Required role: 'Storage Blob Data Contributor' on the storage account" -ForegroundColor Yellow
+            return $false
+        }
+    } finally {
+        # Restore original environment variable
+        if ($null -eq $savedAutoLogin) {
+            Remove-Item Env:AZCOPY_AUTO_LOGIN_TYPE -ErrorAction SilentlyContinue
+        } else {
+            $env:AZCOPY_AUTO_LOGIN_TYPE = $savedAutoLogin
+        }
+    }
+}
 #endregion
 
 #region ── 1. TROUBLESHOOTING & PREREQUISITES ────────────────────────────────────
@@ -1732,6 +1860,12 @@ try {
     Export-SLAReport -SLAMatrix $slaMatrix -IncidentsTable $incidentsTable `
         -HealthTimeline $healthTimeline -OutputFile $OutputPath
 
+    # Step 6: Upload to Azure Blob Storage (if requested)
+    $uploadSuccess = $null
+    if ($BlobContainerUrl) {
+        $uploadSuccess = Upload-ReportToBlob -FilePath $OutputPath -ContainerUrl $BlobContainerUrl
+    }
+
     $stopwatch.Stop()
 
     # ── Summary ─────────────────────────────────────────────────────────────
@@ -1743,6 +1877,14 @@ try {
     Write-Host "  Subs     : $($script:ResolvedSubscriptionIds.Count) subscription(s)" -ForegroundColor White
     Write-Host "  Resources: $($resources.Count) across $($Regions.Count) regions" -ForegroundColor White
     Write-Host "  Incidents: $($incidentsTable.Count) in past month" -ForegroundColor White
+    if ($null -ne $uploadSuccess) {
+        if ($uploadSuccess) {
+            $blobDisplay = $BlobContainerUrl.Split('?')[0].TrimEnd('/')
+            Write-Host "  Blob     : Uploaded to $blobDisplay" -ForegroundColor White
+        } else {
+            Write-Host "  Blob     : Upload FAILED (see errors above)" -ForegroundColor Red
+        }
+    }
     Write-Host ""
 
     # Open the file (skip on Azure Cloud Shell — no desktop environment)
