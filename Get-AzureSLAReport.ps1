@@ -59,7 +59,7 @@ DISCLAIMER:
 .NOTES
     Author  : Guil Lima (Microsoft)
     Date    : 2026-04-08
-    Version : 2.1.0
+    Version : 2.2.0
 #>
 
 [CmdletBinding()]
@@ -67,7 +67,7 @@ param(
     # Region scope: leave empty for ALL regions, or specify specific ones
     [string[]]$Regions = @(),
     [int]$MonthsBack = 12,
-    [string]$OutputPath = (Join-Path $PSScriptRoot "AzureSLA_Report_$(Get-Date -Format 'yyyyMMdd_HHmmss').xlsx"),
+    [string]$OutputPath = (Join-Path $(if ($PSScriptRoot) { $PSScriptRoot } elseif ($env:TEMP) { $env:TEMP } else { '/tmp' }) "AzureSLA_Report_$(Get-Date -Format 'yyyyMMdd_HHmmss').xlsx"),
 
     # Subscription scope: pass one or more subscription IDs, or leave empty for ALL subscriptions
     [string[]]$SubscriptionIds = @(),
@@ -141,9 +141,15 @@ function Upload-ReportToBlob {
     $savedAutoLogin = $env:AZCOPY_AUTO_LOGIN_TYPE
 
     if (-not $hasSasToken) {
-        # Use Azure CLI credentials for auto-login (works in Cloud Shell and locally with az cli)
-        $env:AZCOPY_AUTO_LOGIN_TYPE = 'AZCLI'
-        Write-Host "[INFO ] No SAS token detected — using Azure CLI credentials for azcopy" -ForegroundColor Cyan
+        # Detect environment: Automation Account uses MSI, others use Azure CLI
+        $isAutomation = $env:AUTOMATION_ASSET_ACCOUNTID -or ($PSPrivateMetadata -and $PSPrivateMetadata.JobId)
+        if ($isAutomation) {
+            $env:AZCOPY_AUTO_LOGIN_TYPE = 'MSI'
+            Write-Host "[INFO ] No SAS token detected — using Managed Identity (MSI) for azcopy" -ForegroundColor Cyan
+        } else {
+            $env:AZCOPY_AUTO_LOGIN_TYPE = 'AZCLI'
+            Write-Host "[INFO ] No SAS token detected — using Azure CLI credentials for azcopy" -ForegroundColor Cyan
+        }
     } else {
         Write-Host "[INFO ] SAS token detected in URL — using token-based authentication" -ForegroundColor Cyan
     }
@@ -256,8 +262,21 @@ function Test-Prerequisites {
 
     # ── Check Azure connection ──────────────────────────────────────────────
     Write-Host "`n── Checking Azure connection ──" -ForegroundColor Cyan
+    $isAutomation = $env:AUTOMATION_ASSET_ACCOUNTID -or ($PSPrivateMetadata -and $PSPrivateMetadata.JobId)
     $ctx = Get-AzContext -ErrorAction SilentlyContinue
     if (-not $ctx -or -not $ctx.Account) {
+        if ($isAutomation) {
+            Write-Host "[INFO ] Automation Account detected — authenticating with Managed Identity..." -ForegroundColor Cyan
+            try {
+                Connect-AzAccount -Identity -ErrorAction Stop | Out-Null
+                $ctx = Get-AzContext
+            } catch {
+                Write-Host "`n[ERROR] Managed Identity authentication failed." -ForegroundColor Red
+                Write-Host "  Ensure the Automation Account has a System Assigned Managed Identity enabled" -ForegroundColor Yellow
+                Write-Host "  and that it has 'Reader' role on the target subscriptions." -ForegroundColor Yellow
+                throw "Managed Identity authentication failed: $($_.Exception.Message)"
+            }
+        } else {
         Write-Host "[WARN ] Not connected to Azure. Attempting interactive login..." -ForegroundColor Yellow
         try {
             Connect-AzAccount -ErrorAction Stop | Out-Null
@@ -286,6 +305,7 @@ function Test-Prerequisites {
 "@
             Write-Host $troubleshootMsg -ForegroundColor Yellow
             throw "Azure authentication failed. See troubleshooting steps above."
+        }
         }
     }
 
@@ -1887,10 +1907,17 @@ try {
     }
     Write-Host ""
 
-    # Open the file (skip on Azure Cloud Shell — no desktop environment)
+    # Open the file (skip on Azure Cloud Shell and Automation Account — no desktop environment)
     $isCloudShell = $env:AZUREPS_HOST_ENVIRONMENT -like 'cloud-shell*' -or $env:ACC_CLOUD -or $env:AZURE_HTTP_USER_AGENT -like '*cloud-shell*'
+    $isAutomationEnd = $env:AUTOMATION_ASSET_ACCOUNTID -or ($PSPrivateMetadata -and $PSPrivateMetadata.JobId)
     if ($OutputPath -and (Test-Path $OutputPath)) {
-        if ($isCloudShell) {
+        if ($isAutomationEnd) {
+            Write-Host "`n[INFO ] Running in Azure Automation — skipping file open." -ForegroundColor Cyan
+            if (-not $BlobContainerUrl) {
+                Write-Host "[WARN ] No -BlobContainerUrl specified. The report file will be lost when the sandbox exits." -ForegroundColor Yellow
+                Write-Host "        Add -BlobContainerUrl to upload the report to Azure Blob Storage." -ForegroundColor Yellow
+            }
+        } elseif ($isCloudShell) {
             Write-Host "`n  ╔═══ AZURE CLOUD SHELL ════════════════════════════════════════╗" -ForegroundColor Cyan
             Write-Host "  ║  The report cannot be opened automatically in Cloud Shell.   ║" -ForegroundColor Cyan
             Write-Host "  ║  To download it, use one of these methods:                   ║" -ForegroundColor Cyan

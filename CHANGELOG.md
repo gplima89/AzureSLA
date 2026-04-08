@@ -2,6 +2,20 @@
 
 All notable changes to the Azure SLA & Service Health Report Generator are documented in this file.
 
+## [2.2.0] — 2026-04-08
+
+### Added
+
+- **Azure Automation Account support** — The script now detects when it is running inside an Automation Account (via `$env:AUTOMATION_ASSET_ACCOUNTID` or `$PSPrivateMetadata.JobId`) and adapts automatically:
+  - Authenticates using **Managed Identity** (`Connect-AzAccount -Identity`) instead of interactive login
+  - Uses `AZCOPY_AUTO_LOGIN_TYPE=MSI` for blob uploads (instead of `AZCLI`)
+  - Skips `Invoke-Item` (no desktop environment) and warns if `-BlobContainerUrl` is not set (sandbox is ephemeral)
+  - Falls back to `$env:TEMP` or `/tmp` for `OutputPath` when `$PSScriptRoot` is empty
+
+### Added
+
+- **`AutomationAccount.md`** — Step-by-step guide for running the report in an Azure Automation Account (storage account, managed identity permissions, module imports, runbook creation, scheduling).
+
 ## [2.1.0] — 2026-04-08
 
 ### Added
