@@ -2,6 +2,17 @@
 
 All notable changes to the Azure SLA & Service Health Report Generator are documented in this file.
 
+## [2.2.1] — 2026-04-08
+
+### Fixed
+
+- **Automation Account silent failure** — All `Write-Host` output was invisible in Azure Automation because `$InformationPreference` defaults to `SilentlyContinue` in the PS 7.2 runtime. Fixed by:
+  - Setting `$InformationPreference = 'Continue'` automatically when Automation Account is detected
+  - Setting `$ProgressPreference = 'SilentlyContinue'` to suppress `Write-Progress` noise in Automation
+  - Adding `Write-Output` breadcrumb messages at every major step (`[START]`, `[STEP]`, `[DONE]`, `[ERROR]`, `[FATAL]`) so progress and errors always appear in the Automation job **Output** tab
+  - Duplicating the `catch` block error output via `Write-Output` (previously only used `Write-Host`)
+- **Automation detection centralized** — Replaced scattered `$isAutomation` local variables with a single `$script:IsAutomationAccount` flag computed once at script startup using `Get-Variable -Name PSPrivateMetadata` (safer than direct access)
+
 ## [2.2.0] — 2026-04-08
 
 ### Added

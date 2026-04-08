@@ -59,7 +59,7 @@ DISCLAIMER:
 .NOTES
     Author  : Guil Lima (Microsoft)
     Date    : 2026-04-08
-    Version : 2.2.0
+    Version : 2.2.1
 #>
 
 [CmdletBinding()]
@@ -77,6 +77,19 @@ param(
     # URL with SAS token: https://account.blob.core.windows.net/container?sv=2022-11-02&ss=b&srt=o&sp=wc...
     [string]$BlobContainerUrl = ""
 )
+
+# ── Automation Account / non-interactive environment detection ──────────────
+# Detect early so we can configure output streams before anything else
+$script:IsAutomationAccount = [bool]($env:AUTOMATION_ASSET_ACCOUNTID -or (Get-Variable -Name PSPrivateMetadata -ValueOnly -ErrorAction SilentlyContinue).JobId)
+
+if ($script:IsAutomationAccount) {
+    # Write-Host (Information stream) is suppressed by default in Automation.
+    # Force it to Continue so all Write-Host output appears in "All Logs".
+    $InformationPreference = 'Continue'
+    # Write-Progress causes noise in Automation logs — suppress it.
+    $ProgressPreference    = 'SilentlyContinue'
+    Write-Output "[AUTOMATION] Azure Automation Account detected — configuring output streams..." 
+}
 
 # ── Resolve OutputPath: if it's a directory, append the default filename ────
 $defaultFileName = "AzureSLA_Report_$(Get-Date -Format 'yyyyMMdd_HHmmss').xlsx"
@@ -142,8 +155,7 @@ function Upload-ReportToBlob {
 
     if (-not $hasSasToken) {
         # Detect environment: Automation Account uses MSI, others use Azure CLI
-        $isAutomation = $env:AUTOMATION_ASSET_ACCOUNTID -or ($PSPrivateMetadata -and $PSPrivateMetadata.JobId)
-        if ($isAutomation) {
+        if ($script:IsAutomationAccount) {
             $env:AZCOPY_AUTO_LOGIN_TYPE = 'MSI'
             Write-Host "[INFO ] No SAS token detected — using Managed Identity (MSI) for azcopy" -ForegroundColor Cyan
         } else {
@@ -262,15 +274,18 @@ function Test-Prerequisites {
 
     # ── Check Azure connection ──────────────────────────────────────────────
     Write-Host "`n── Checking Azure connection ──" -ForegroundColor Cyan
-    $isAutomation = $env:AUTOMATION_ASSET_ACCOUNTID -or ($PSPrivateMetadata -and $PSPrivateMetadata.JobId)
+    Write-Output "[STEP ] Checking Azure connection..."
     $ctx = Get-AzContext -ErrorAction SilentlyContinue
     if (-not $ctx -or -not $ctx.Account) {
-        if ($isAutomation) {
+        if ($script:IsAutomationAccount) {
             Write-Host "[INFO ] Automation Account detected — authenticating with Managed Identity..." -ForegroundColor Cyan
+            Write-Output "[AUTH ] Authenticating with Managed Identity..."
             try {
                 Connect-AzAccount -Identity -ErrorAction Stop | Out-Null
                 $ctx = Get-AzContext
+                Write-Output "[AUTH ] Managed Identity authentication successful: $($ctx.Account.Id)"
             } catch {
+                Write-Output "[ERROR] Managed Identity authentication FAILED: $($_.Exception.Message)"
                 Write-Host "`n[ERROR] Managed Identity authentication failed." -ForegroundColor Red
                 Write-Host "  Ensure the Automation Account has a System Assigned Managed Identity enabled" -ForegroundColor Yellow
                 Write-Host "  and that it has 'Reader' role on the target subscriptions." -ForegroundColor Yellow
@@ -1826,12 +1841,15 @@ function Export-SLAReport {
 #region ── 6. MAIN EXECUTION ─────────────────────────────────────────────────────
 
 try {
+    Write-Output "[START] Azure SLA Report Generator v2.2.1 — $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC' -AsUTC)"
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
     # Step 1: Prerequisites & connection
+    Write-Output "[STEP ] Step 1/6: Checking prerequisites..."
     $context = Test-Prerequisites
 
     # Step 2: Resolve regions
+    Write-Output "[STEP ] Step 2/6: Resolving regions..."
     $Regions = Resolve-Regions -RequestedRegions $Regions
 
     # Step 3: Define date ranges
@@ -1847,6 +1865,7 @@ try {
     Write-Host "  Subscriptions: $($script:ResolvedSubscriptionIds.Count) subscription(s)`n" -ForegroundColor Gray
 
     # Step 3: Collect data
+    Write-Output "[STEP ] Step 3/6: Collecting data ($($script:ResolvedSubscriptionIds.Count) subs, $($Regions.Count) regions)..."
     $resources      = Get-ResourceInventory -TargetRegions $Regions
     $healthData     = Get-ResourceAvailability -TargetRegions $Regions -StartDate $startDate12m -EndDate $endDate
     $incidents12m   = Get-ServiceHealthIncidents -TargetRegions $Regions -StartDate $startDate12m -EndDate $endDate
@@ -1857,6 +1876,7 @@ try {
     $healthEvents   = Get-ResourceHealthEvents -TargetRegions $Regions -StartDate $startDate1m -EndDate $endDate
 
     # Step 4: Build report data
+    Write-Output "[STEP ] Step 4/6: Building report data..."
     $slaMatrix = Build-SLAMatrix `
         -HealthData $healthData `
         -Incidents $incidents12m `
@@ -1877,13 +1897,23 @@ try {
         -EndDate $endDate
 
     # Step 5: Export to Excel
+    Write-Output "[STEP ] Step 5/6: Exporting Excel report..."
     Export-SLAReport -SLAMatrix $slaMatrix -IncidentsTable $incidentsTable `
         -HealthTimeline $healthTimeline -OutputFile $OutputPath
+    Write-Output "[STEP ] Report saved to: $OutputPath"
 
     # Step 6: Upload to Azure Blob Storage (if requested)
     $uploadSuccess = $null
     if ($BlobContainerUrl) {
+        Write-Output "[STEP ] Step 6/6: Uploading report to Azure Blob Storage..."
         $uploadSuccess = Upload-ReportToBlob -FilePath $OutputPath -ContainerUrl $BlobContainerUrl
+        if ($uploadSuccess) {
+            Write-Output "[DONE ] Report uploaded successfully to blob storage."
+        } else {
+            Write-Output "[ERROR] Blob upload failed — check errors above."
+        }
+    } else {
+        Write-Output "[STEP ] Step 6/6: No -BlobContainerUrl specified — skipping upload."
     }
 
     $stopwatch.Stop()
@@ -1907,11 +1937,13 @@ try {
     }
     Write-Host ""
 
+    # Write-Output summary for Automation Account "Output" tab
+    Write-Output "[DONE ] Report generated in $([Math]::Round($stopwatch.Elapsed.TotalSeconds, 1))s — $($resources.Count) resources, $($incidentsTable.Count) incidents, $($script:ResolvedSubscriptionIds.Count) subs, $($Regions.Count) regions"
+
     # Open the file (skip on Azure Cloud Shell and Automation Account — no desktop environment)
     $isCloudShell = $env:AZUREPS_HOST_ENVIRONMENT -like 'cloud-shell*' -or $env:ACC_CLOUD -or $env:AZURE_HTTP_USER_AGENT -like '*cloud-shell*'
-    $isAutomationEnd = $env:AUTOMATION_ASSET_ACCOUNTID -or ($PSPrivateMetadata -and $PSPrivateMetadata.JobId)
     if ($OutputPath -and (Test-Path $OutputPath)) {
-        if ($isAutomationEnd) {
+        if ($script:IsAutomationAccount) {
             Write-Host "`n[INFO ] Running in Azure Automation — skipping file open." -ForegroundColor Cyan
             if (-not $BlobContainerUrl) {
                 Write-Host "[WARN ] No -BlobContainerUrl specified. The report file will be lost when the sandbox exits." -ForegroundColor Yellow
@@ -1936,6 +1968,10 @@ try {
     }
 
 } catch {
+    # Write-Output ensures errors are visible in Automation Account "Output" tab
+    Write-Output "[FATAL] $($_.Exception.Message)"
+    Write-Output "  Line: $($_.InvocationInfo.ScriptLineNumber)"
+    Write-Output "  Stack: $($_.ScriptStackTrace)"
     Write-Host "`n[FATAL] $($_.Exception.Message)" -ForegroundColor Red
     Write-Host "  Line: $($_.InvocationInfo.ScriptLineNumber)" -ForegroundColor Red
     Write-Host "  Stack: $($_.ScriptStackTrace)" -ForegroundColor DarkRed
