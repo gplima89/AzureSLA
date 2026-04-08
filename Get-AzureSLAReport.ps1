@@ -252,21 +252,26 @@ function Test-Prerequisites {
         @{ Name = 'ImportExcel';        MinVersion = '7.0.0' }
     )
 
+    $missingList = [System.Collections.Generic.List[string]]::new()
+
     foreach ($mod in $requiredModules) {
         $installed = Get-Module -ListAvailable -Name $mod.Name | Sort-Object Version -Descending | Select-Object -First 1
         if (-not $installed) {
             Write-Host "[MISSING] Module '$($mod.Name)' is not installed." -ForegroundColor Red
             Write-Host "          Run:  Install-Module -Name $($mod.Name) -Scope CurrentUser -Force" -ForegroundColor Yellow
-            $missingModules = $true
+            Write-Output "[MISSING] Module '$($mod.Name)' is not installed. Install with: Install-Module -Name $($mod.Name) -Scope CurrentUser -Force"
+            $missingList.Add($mod.Name)
         } else {
             Write-Host "[  OK  ] $($mod.Name) v$($installed.Version)" -ForegroundColor Green
         }
     }
-    if ($missingModules) {
+    if ($missingList.Count -gt 0) {
         Write-Host "`n[ACTION] Install missing modules before proceeding. Example:" -ForegroundColor Red
         Write-Host "         Install-Module Az -Scope CurrentUser -Force" -ForegroundColor Yellow
         Write-Host "         Install-Module ImportExcel -Scope CurrentUser -Force`n" -ForegroundColor Yellow
-        throw "Missing required PowerShell modules. See messages above."
+        $names = $missingList -join ', '
+        Write-Output "[ERROR] Missing modules: $names — import these into your Automation Account under Modules (Runtime 7.2)"
+        throw "Missing required PowerShell modules: $names. In Automation Account, go to Modules > Add a module > Browse gallery, and import each module with Runtime version 7.2. Import Az.Accounts FIRST, wait for it to complete, then import the others."
     }
 
     # ── Import modules ──────────────────────────────────────────────────────
