@@ -199,30 +199,38 @@ The runbook runs on **PowerShell 7.2** runtime. You need to import the required 
 
 ### Required Modules
 
-| Module | Version | Notes |
-|--------|---------|-------|
-| `Az.Accounts` | Latest | Core authentication — **import first** |
-| `Az.ResourceGraph` | Latest | Resource Graph queries |
-| `Az.Monitor` | Latest | Activity Log queries |
-| `Az.Resources` | Latest | Provider registration |
-| `ImportExcel` | Latest | Excel file generation |
+| Module | Recommended Version | Notes |
+|--------|---------------------|-------|
+| `Az.Accounts` | **Use the built-in global** (2.15.0) | **Do NOT import a newer version** — see warning below |
+| `Az.ResourceGraph` | **0.13.0** | Import as custom module (Runtime 7.2) |
+| `Az.Monitor` | **Use the built-in global** (5.0.0) | Pre-installed in the Automation sandbox |
+| `Az.Resources` | **Use the built-in global** (6.13.0) | Pre-installed in the Automation sandbox |
+| `ImportExcel` | **7.8.10** (or latest) | Import as custom module (Runtime 7.2) |
 
-> **Important**: `Az.Accounts` must be imported **before** the other `Az.*` modules.
+> **⚠️ Critical: Do NOT import Az.Accounts 3.0.0 or newer as a custom module.**
+>
+> Newer versions of `Az.Accounts` (≥ 3.0.0) use an assembly load context (`AzAssemblyLoadContextInitializer`) that is **incompatible with the Azure Automation sandbox**, causing the runbook to fail immediately with:
+> ```
+> Unable to find type [Microsoft.Azure.PowerShell.AuthenticationAssemblyLoadContext.AzAssemblyLoadContextInitializer]
+> ```
+> The built-in global `Az.Accounts 2.15.0` works correctly. Similarly, keep `Az.Monitor` and `Az.Resources` at their built-in global versions.
+>
+> **Az.ResourceGraph** must be imported as a custom module because it’s not pre-installed. Use version **0.13.0** which requires `Az.Accounts ≥ 2.9.1` (compatible with the built-in 2.15.0). Do NOT use v1.0.0+ which requires `Az.Accounts ≥ 4.2.0`.
+
+> **Only two custom modules are needed**: `Az.ResourceGraph` (0.13.0) and `ImportExcel` (7.8.10).
 
 ### Azure Portal
 
 1. Go to your Automation Account → **Modules** (under Shared Resources)
 2. Click **+ Add a module**
 3. **Module source**: Browse gallery
-4. Search for `Az.Accounts`
+4. Search for `Az.ResourceGraph`
 5. Select it → Choose **Runtime version**: `7.2`
 6. Click **Import**
 7. **Wait for it to finish** (status changes from "Importing" to "Available") — this can take 5–15 minutes
-8. Repeat for each remaining module in order:
-   - `Az.ResourceGraph`
-   - `Az.Monitor`
-   - `Az.Resources`
-   - `ImportExcel`
+8. Repeat for `ImportExcel`
+
+> **That’s it.** You only need to import `Az.ResourceGraph` and `ImportExcel`. The other Az modules (`Az.Accounts`, `Az.Monitor`, `Az.Resources`) are already available as built-in globals.
 
 ### PowerShell (Az Module)
 
@@ -230,36 +238,21 @@ The runbook runs on **PowerShell 7.2** runtime. You need to import the required 
 $automationAccount = "aa-sla-reports"
 $resourceGroup     = "rg-sla-reports"
 
-# Import Az.Accounts first (dependency for others)
+# Import Az.ResourceGraph 0.13.0 (compatible with built-in Az.Accounts 2.15.0)
 New-AzAutomationModule -AutomationAccountName $automationAccount `
     -ResourceGroupName $resourceGroup `
-    -Name "Az.Accounts" `
-    -ContentLinkUri "https://www.powershellgallery.com/api/v2/package/Az.Accounts" `
+    -Name "Az.ResourceGraph" `
+    -ContentLinkUri "https://www.powershellgallery.com/api/v2/package/Az.ResourceGraph/0.13.0" `
     -RuntimeVersion "7.2"
 
-# Wait for Az.Accounts to finish importing before continuing
-Write-Host "Waiting for Az.Accounts to import..."
-do {
-    Start-Sleep -Seconds 30
-    $mod = Get-AzAutomationModule -AutomationAccountName $automationAccount `
-        -ResourceGroupName $resourceGroup -Name "Az.Accounts" `
-        -RuntimeVersion "7.2" -ErrorAction SilentlyContinue
-    Write-Host "  Status: $($mod.ProvisioningState)"
-} while ($mod.ProvisioningState -ne "Succeeded")
+# Import ImportExcel
+New-AzAutomationModule -AutomationAccountName $automationAccount `
+    -ResourceGroupName $resourceGroup `
+    -Name "ImportExcel" `
+    -ContentLinkUri "https://www.powershellgallery.com/api/v2/package/ImportExcel" `
+    -RuntimeVersion "7.2"
 
-# Import remaining modules
-$modules = @("Az.ResourceGraph", "Az.Monitor", "Az.Resources", "ImportExcel")
-foreach ($modName in $modules) {
-    Write-Host "Importing $modName..."
-    New-AzAutomationModule -AutomationAccountName $automationAccount `
-        -ResourceGroupName $resourceGroup `
-        -Name $modName `
-        -ContentLinkUri "https://www.powershellgallery.com/api/v2/package/$modName" `
-        -RuntimeVersion "7.2"
-    Start-Sleep -Seconds 10
-}
-
-Write-Host "All modules queued for import. Check the portal for status."
+Write-Host "Modules queued for import. Check the portal for status."
 ```
 
 ---
@@ -357,28 +350,37 @@ Before scheduling, run it manually to verify everything works.
 ### Expected Output
 
 ```
-[  OK  ] Az.Accounts v...
-[  OK  ] Az.ResourceGraph v...
-[  OK  ] Az.Monitor v...
-[  OK  ] Az.Resources v...
-[  OK  ] ImportExcel v...
-[  OK  ] Connected as: (managed identity)
+[AUTOMATION] Azure Automation Account detected — configuring output streams...
+[START] Azure SLA Report Generator v2.2.2 — 2026-04-08 15:00:00 UTC
+[STEP ] Step 1/6: Checking prerequisites...
+[  OK  ] Az.Accounts v2.15.0
+[  OK  ] Az.ResourceGraph v0.13.0
+[  OK  ] Az.Monitor v5.0.0
+[  OK  ] Az.Resources v6.13.0
+[  OK  ] ImportExcel v7.8.10
+[AUTH ] Authenticating with Managed Identity...
+[AUTH ] Managed Identity authentication successful
 [  OK  ] Found X enabled subscription(s)
 ...
-[  OK  ] Report saved to: /tmp/AzureSLA_Report_20260408_080000.xlsx
-[  OK  ] azcopy found: /usr/bin/azcopy
-[  OK  ] Blob container accessible
-[  OK  ] Report uploaded to: https://stslareports.blob.core.windows.net/sla-reports/AzureSLA_Report_20260408_080000.xlsx
+[STEP ] Step 5/6: Exporting Excel report...
+[STEP ] Report saved to: /tmp/AzureSLA_Report_20260408_150000.xlsx
+[UPLOAD] Starting blob upload...
+[UPLOAD] azcopy not available, using REST API
+[UPLOAD] Uploading via REST API with bearer token...
+[UPLOAD] SUCCESS via REST API: https://stslareports.blob.core.windows.net/sla-reports/AzureSLA_Report_20260408_150000.xlsx
+[DONE ] Report uploaded successfully to blob storage.
+[DONE ] Report generated in 60s — X resources, Y incidents, Z subs, N regions
 ```
 
 ### Common Issues
 
 | Issue | Solution |
 |-------|----------|
-| **Module not found** | Ensure all modules are imported with runtime version 7.2 and status is "Available" |
+| **Module not found** | Ensure `Az.ResourceGraph` and `ImportExcel` are imported with runtime version 7.2 and status is "Available". Other Az modules use the built-in globals. |
 | **Authentication failed** | Verify the managed identity is enabled and has Reader on the target subscriptions |
-| **Blob upload failed** | Verify `Storage Blob Data Contributor` is assigned on the storage account (not subscription) |
-| **azcopy not found** | azcopy is pre-installed in the Automation sandbox. If missing, use the Az.Storage module as an alternative (see Appendix below) |
+| **Blob upload failed** | Verify `Storage Blob Data Contributor` is assigned on the storage account (not subscription). The script uses the REST API with a bearer token — no `azcopy` needed. |
+| **AzAssemblyLoadContextInitializer error** | You imported a newer Az.Accounts (≥ 3.0.0) as a custom module. Remove it and use the built-in global (2.15.0). |
+| **Az.ResourceGraph requires newer Az.Accounts** | You imported Az.ResourceGraph 1.0.0+. Use version 0.13.0 instead (compatible with Az.Accounts 2.15.0). |
 | **Timeout** | Default job timeout is 3 hours. For very large environments (700+ subs), consider using `-Regions` or `-SubscriptionIds` to narrow scope |
 
 ---
@@ -444,29 +446,24 @@ Register-AzAutomationScheduledRunbook `
 | 2 | Create Automation Account with System Managed Identity | ☐ |
 | 3a | Assign **Reader** to Managed Identity on target subscription(s) | ☐ |
 | 3b | Assign **Storage Blob Data Contributor** to Managed Identity on Storage Account | ☐ |
-| 4 | Import modules: Az.Accounts → Az.ResourceGraph → Az.Monitor → Az.Resources → ImportExcel (all runtime 7.2) | ☐ |
+| 4 | Import custom modules: Az.ResourceGraph (0.13.0), ImportExcel (runtime 7.2). Other Az modules use built-in globals. | ☐ |
 | 5 | Create Runbook (PowerShell 7.2), paste script, publish | ☐ |
 | 6 | Test the runbook manually with `-BlobContainerUrl` | ☐ |
 | 7 | Create a monthly schedule and link it to the runbook | ☐ |
 
 ---
 
-## Appendix: Alternative Blob Upload Without azcopy
+## Appendix: Upload Method
 
-If azcopy is not available in the Automation sandbox, you can upload using the `Az.Storage` module instead. Add this module to Step 4, then replace the `-BlobContainerUrl` parameter with a manual upload after the script runs:
+The script automatically handles blob upload without `azcopy`:
 
-```powershell
-# Alternative: upload using Az.Storage (add after Export-SLAReport in the runbook)
-$storageAccount = Get-AzStorageAccount -ResourceGroupName "rg-sla-reports" -Name "stslareports"
-$ctx = $storageAccount.Context
-Set-AzStorageBlobContent -File $OutputPath `
-    -Container "sla-reports" `
-    -Blob (Split-Path $OutputPath -Leaf) `
-    -Context $ctx `
-    -Force
-```
+1. **If `azcopy` is available** — uses `azcopy copy` with MSI auth (`AZCOPY_AUTO_LOGIN_TYPE=MSI`)
+2. **If `azcopy` is not available** (typical in Automation sandbox) — falls back to the **Azure Storage REST API** using a bearer token from `Get-AzAccessToken -ResourceUrl 'https://storage.azure.com/'`
+3. **If a SAS token URL is provided** — uploads via REST API directly with the SAS token in the URL
 
-This uses the managed identity's RBAC permissions (same `Storage Blob Data Contributor` role) without needing azcopy.
+No additional modules (like `Az.Storage`) are needed. The REST API fallback uses only `Invoke-RestMethod` and `Get-AzAccessToken` (from `Az.Accounts`).
+
+This uses the managed identity's RBAC permissions (same `Storage Blob Data Contributor` role) without needing any extra tools.
 
 ---
 

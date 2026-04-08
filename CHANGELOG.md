@@ -2,6 +2,24 @@
 
 All notable changes to the Azure SLA & Service Health Report Generator are documented in this file.
 
+## [2.2.2] — 2026-04-08
+
+### Fixed
+
+- **Blob upload fails in Automation Account** — `azcopy` is not available in the Azure Automation sandbox. The `Upload-ReportToBlob` function now falls back to the **Azure Storage REST API** when `azcopy` is not found, using a bearer token obtained via `Get-AzAccessToken -ResourceUrl 'https://storage.azure.com/'`. This works natively with the Automation Account's Managed Identity — no extra modules or tools required.
+- **New `Upload-ViaRestApi` helper** — Standalone function that uploads a file to Azure Blob Storage using the REST API with a bearer token (PUT with `x-ms-blob-type: BlockBlob`). Supports both Managed Identity and Azure CLI authentication contexts.
+- **SAS token REST upload** — When a SAS token URL is provided, the REST API path uploads directly without needing a bearer token.
+- **Upload breadcrumbs** — Every upload step now emits `Write-Output` messages (`[UPLOAD] ...`) visible in the Automation Account **Output** tab, regardless of whether `azcopy` or REST API is used.
+
+### Changed
+
+- **`azcopy` is no longer required** — The `-BlobContainerUrl` parameter now works without `azcopy` installed. The upload order is: (1) try `azcopy` if available, (2) fall back to REST API with bearer token or SAS token. This makes blob upload work out of the box in Azure Automation Accounts.
+
+### Documentation
+
+- **`AutomationAccount.md`** — Updated module version guidance with tested compatible versions and warnings against importing newer Az.Accounts (≥ 3.0.0) which causes `AzAssemblyLoadContextInitializer` errors in the Automation sandbox. Removed the `Az.Storage` workaround appendix (no longer needed).
+- **`README.md`** — Updated Blob Storage section to reflect that `azcopy` is now optional with automatic REST API fallback.
+
 ## [2.2.1] — 2026-04-08
 
 ### Fixed

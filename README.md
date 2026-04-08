@@ -136,7 +136,7 @@ If a cell shows **N/A**, it means you have **zero resources** of that service ty
 | **PowerShell 7+** | Recommended. Download from [https://aka.ms/powershell](https://aka.ms/powershell). Windows PowerShell 5.1 also works but parallel API calls (faster for large environments) require PowerShell 7+. |
 | **Internet access** | The script connects to Azure APIs — your machine must be able to reach `https://management.azure.com` and `https://login.microsoftonline.com`. |
 | **No Excel needed** | The report is generated using the `ImportExcel` module, which creates `.xlsx` files without requiring Microsoft Excel to be installed. You'll need Excel (or a compatible viewer) only to **open** the report. |
-| **azcopy** *(optional)* | Only required if you use `-BlobContainerUrl` to upload the report to Azure Blob Storage. Pre-installed in Azure Cloud Shell. Download from [https://aka.ms/azcopy](https://aka.ms/azcopy). |
+| **azcopy** *(optional)* | Only needed if you want to use `azcopy` as the upload method for `-BlobContainerUrl`. The script **automatically falls back to the Azure Storage REST API** when `azcopy` is not available, so blob upload works without it (including in Azure Automation Accounts). Pre-installed in Azure Cloud Shell. Download from [https://aka.ms/azcopy](https://aka.ms/azcopy). |
 
 ### PowerShell Modules
 
@@ -253,19 +253,22 @@ The Excel file opens automatically. Start with the **SLA Overview** tab to see t
 | `-MonthsBack` | `int` | `12` | How many months of history to include |
 | `-OutputPath` | `string` | Script folder | Full path for the output `.xlsx` file |
 | `-SubscriptionIds` | `string[]` | All enabled subscriptions | Specific subscription IDs to include |
-| `-BlobContainerUrl` | `string` | *(none)* | Azure Blob Storage container URL to upload the report via azcopy. Accepts a plain URL or a URL with SAS token. |
+| `-BlobContainerUrl` | `string` | *(none)* | Azure Blob Storage container URL to upload the report. Accepts a plain URL (uses `azcopy` if available, otherwise falls back to REST API with bearer token) or a URL with SAS token. Works in Azure Automation Accounts with Managed Identity. |
 
 ---
 
 ## Uploading the Report to Azure Blob Storage
 
-Use the `-BlobContainerUrl` parameter to automatically upload the generated report to an Azure Storage blob container. This works both locally and from Azure Cloud Shell.
+Use the `-BlobContainerUrl` parameter to automatically upload the generated report to an Azure Storage blob container. This works locally, from Azure Cloud Shell, and from Azure Automation Accounts.
+
+The script tries `azcopy` first (if installed), and **automatically falls back to the Azure Storage REST API** when `azcopy` is not available. The REST API path uses a bearer token from your current Azure context (Azure CLI credentials, Managed Identity, etc.), so no additional tools are required.
 
 ### Authentication Options
 
 | Method | When to Use | Setup |
 |--------|------------|-------|
-| **Azure CLI credentials** | You have Azure CLI installed and are logged in (`az login`) | Just pass the plain container URL — the script sets `AZCOPY_AUTO_LOGIN_TYPE=AZCLI` automatically |
+| **Azure CLI credentials** | You have Azure CLI installed and are logged in (`az login`) | Just pass the plain container URL — the script uses `azcopy` (with `AZCLI` auth) or the REST API with a bearer token |
+| **Managed Identity** | Running in an Azure Automation Account | The script uses the REST API with a bearer token from the Managed Identity — no extra tools needed |
 | **SAS token** | You don't have Azure CLI, or need to share a one-time upload URL | Append the SAS token to the URL: `https://account.blob.core.windows.net/container?sv=...` |
 | **azcopy login** | You prefer to authenticate azcopy directly | Run `azcopy login` before the script, then pass the plain URL |
 | **Cloud Shell** | Running from Azure Cloud Shell | Azure CLI is pre-installed and authenticated — plain URL works out of the box |
@@ -299,10 +302,11 @@ If using a **SAS token**, ensure it has both **write (w)** and **create (c)** pe
 
 ### What Happens
 
-1. The script checks that `azcopy` is installed (error with install instructions if not)
-2. Validates access to the blob container by listing its contents
-3. Uploads the `.xlsx` report to the container
-4. Shows success/failure in the summary output
+1. The script checks if `azcopy` is installed
+2. If `azcopy` is available, it uploads using `azcopy copy` with the appropriate auth method
+3. If `azcopy` is not available (e.g., in Azure Automation), it falls back to the **Azure Storage REST API** using a bearer token from your current Azure context
+4. For SAS token URLs, the REST API uploads directly without needing a bearer token
+5. Shows success/failure in the summary output
 
 If the upload fails, the report is still saved locally — you won't lose data.
 
