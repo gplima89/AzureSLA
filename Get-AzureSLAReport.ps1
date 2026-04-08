@@ -1,4 +1,42 @@
 <#
+MIT License
+
+Copyright (c) 2024 Guil Lima
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+DISCLAIMER:
+  This report is an estimation tool, NOT an official SLA measurement.
+  The availability percentages shown are approximations based on Azure Resource
+  Health signals and Service Health incident tracking data. They are NOT the same
+  as Microsoft's contractual SLA metrics. Official Azure SLAs are defined in the
+  Service Level Agreements for Online Services:
+  https://www.microsoft.com/licensing/docs/view/Service-Level-Agreements-SLA-for-Online-Services
+
+  Always review and validate the results against your own monitoring data
+  (Azure Monitor, Application Insights, third-party tools, etc.) before
+  presenting them in reports or making decisions based on them.
+
+  This tool is intended as a supplementary data source for operational reviews,
+  governance reporting, and trend analysis — not as the single source of truth
+  for availability.
+
 .SYNOPSIS
     Azure SLA & Service Health Report Generator
 
