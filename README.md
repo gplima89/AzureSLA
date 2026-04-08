@@ -333,6 +333,104 @@ Register-ScheduledTask -TaskName "Azure SLA Report" -Action $action -Trigger $tr
 
 ---
 
+## Detailed SLA Calculation
+
+This section provides a technical deep-dive into how the availability percentages are computed.
+
+### Data Sources
+
+| Source | API / Query Target | Role in SLA Calculation |
+|--------|-------------------|------------------------|
+| **HealthResources** (Resource Graph) | `microsoft.resourcehealth/availabilitystatuses` | Per-resource availability state changes (Available, Unavailable, Degraded) — the **primary** signal |
+| **ServiceHealthResources** (Resource Graph) | `microsoft.resourcehealth/events` | Service-level incident windows (start/end) — **supplementary** signal |
+| **Activity Log** (REST API) | `Microsoft.Insights/eventtypes/management/values` | Used **only** for Tab 2 (Incidents & Alerts) — does **not** feed into the SLA percentage |
+
+### Health Data Collection
+
+- The script queries `HealthResources` for 8 tracked resource types (VMs, VMSS, SQL DB/Server/MI, Web Apps, App Service Plans, Storage Accounts) across all regions.
+- Because `HealthResources` is tenant-scoped and subscriptions are batched in groups of 200 (Azure Resource Graph limit), duplicate records can appear across batches. These are **deduplicated** using a composite key: `resourceId|availabilityState|occurredTime`.
+- Each record is assigned a `ServiceCategory` (Compute, SQL DB, Web Apps, Storage) via a KQL `case` statement.
+
+### Incident Collection
+
+- The script queries `servicehealthresources` for `microsoft.resourcehealth/events`.
+- Timestamps (`ImpactStartTime`, `ImpactMitigationTime`) are stored as .NET ticks (Int64), not ISO-8601 strings. A `Convert-TicksToDateTime` helper converts them, returning `$null` for ticks ≤ 0 or dates before year 2000 (safety check for garbage data).
+- Incidents are **deduplicated** by tracking ID (`Sort-Object -Property name -Unique`).
+- **Only `ServiceIssue` events** count toward availability. `PlannedMaintenance`, `HealthAdvisory`, and `SecurityAdvisory` events are excluded from the SLA calculation (they still appear in Tabs 2 and 3).
+- **Active incidents** (no end time): if a `lastUpdateTime` exists, it is used as a proxy end time. If not, the incident is skipped entirely to avoid inflating downtime. Resolved incidents with no end time get a conservative 1-hour estimate.
+
+### Pre-indexing
+
+Before building the matrix, all data is binned into hashtables keyed by `region|category|yyyy-MM` for O(1) lookups:
+
+- **Health index** — stores `unhealthy` count (any state ≠ `Available`) and `total` count per bucket.
+- **Incident index** — stores a list of `{Start, End}` windows per bucket. Each incident is binned into every month it overlaps.
+- **Month boundaries** — start date, end date, and total minutes for each of the 12 months are pre-computed once.
+
+### Per-Cell Calculation
+
+Each cell in the SLA Overview tab represents one **(Region, Service Category, Month)** combination.
+
+#### If resource count = 0 → cell = "N/A"
+
+No calculation is possible.
+
+#### Component 1: Health Downtime
+
+```
+healthDowntime = min(1, unhealthyCount / resourceCount) × 30 minutes
+```
+
+- `unhealthyCount` = number of health records with state ≠ `Available` in this bucket.
+- `resourceCount` = current count of resources in this region + category.
+- The 30-minute constant represents the assumed duration of a single health event. The fraction normalises by fleet size: if 5 of 100 resources reported unhealthy → 5% × 30 = **1.5 minutes** of service-level downtime.
+- The fraction is capped at 1.0 so health downtime never exceeds 30 minutes.
+
+#### Component 2: Incident Downtime
+
+For each incident window in the bucket:
+
+1. **Clamp to month boundaries** — windows that extend outside the calendar month are trimmed to the month's start/end.
+
+2. **Merge overlapping intervals** — a sweep-line algorithm prevents double-counting:
+   - Sort all clamped windows by start time.
+   - Walk through sequentially: if the next window's start ≤ current window's end → extend the current window. Otherwise, emit the current window and start a new one.
+   - This ensures the same time period is never counted twice, even when multiple incidents overlap.
+
+3. **Cap each merged window at 4 hours (240 minutes)** — incident tracking windows represent the investigation period (from "we started investigating" to "we confirmed mitigation"), not continuous outage. The actual downtime is typically a fraction of that window. The per-resource health data above is the more granular signal; incidents are supplementary.
+
+4. Sum all capped merged windows → `incidentDowntime`.
+
+#### Final Availability Formula
+
+```
+downtimeMinutes = healthDowntime + incidentDowntime
+downtimeMinutes = min(downtimeMinutes, totalMinutes)    ← clamp so SLA ≥ 0%
+
+Availability % = ((totalMinutes − downtimeMinutes) / totalMinutes) × 100
+```
+
+Rounded to 4 decimal places (e.g. `99.9931%`).
+
+- `totalMinutes` = total minutes in the calendar month (e.g. 44,640 for a 31-day month).
+
+### Edge Cases
+
+| Scenario | Handling |
+|----------|----------|
+| No resources in region/category | Cell = `"N/A"` |
+| More unhealthy events than resources | Fraction capped at 1.0 (max 30 min health downtime) |
+| Total downtime exceeds month minutes | Clamped to total minutes → SLA never goes below 0% |
+| Active incident with no end time | Uses `lastUpdateTime` as proxy; skipped entirely if none exists |
+| Null or zero ticks in timestamps | `Convert-TicksToDateTime` returns `$null` → event skipped |
+| Incident spans multiple months | Binned into each overlapping month, clamped independently, 4h cap applied per-month |
+| Overlapping incidents in the same month | Merged before counting → same time period never counted twice |
+| Non-ServiceIssue events | Excluded from SLA calculation (still shown in Tabs 2 & 3) |
+| Duplicate records from subscription batching | Health: deduplicated by composite key; Incidents: deduplicated by tracking ID |
+| SLA ≤ 50% | `[DIAG]` log line emitted to console with full breakdown for troubleshooting |
+
+---
+
 ## License
 
 MIT License
