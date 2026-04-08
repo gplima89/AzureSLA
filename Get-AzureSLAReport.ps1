@@ -1,7 +1,7 @@
 <#
 MIT License
 
-Copyright (c) 2024 Guil Lima
+Copyright (c) 2026 Guil Lima
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -1745,10 +1745,25 @@ try {
     Write-Host "  Incidents: $($incidentsTable.Count) in past month" -ForegroundColor White
     Write-Host ""
 
-    # Open the file
+    # Open the file (skip on Azure Cloud Shell — no desktop environment)
+    $isCloudShell = $env:AZUREPS_HOST_ENVIRONMENT -like 'cloud-shell*' -or $env:ACC_CLOUD -or $env:AZURE_HTTP_USER_AGENT -like '*cloud-shell*'
     if ($OutputPath -and (Test-Path $OutputPath)) {
-        Write-Host "Opening report..." -ForegroundColor Cyan
-        Invoke-Item $OutputPath
+        if ($isCloudShell) {
+            Write-Host "`n  ╔═══ AZURE CLOUD SHELL ════════════════════════════════════════╗" -ForegroundColor Cyan
+            Write-Host "  ║  The report cannot be opened automatically in Cloud Shell.   ║" -ForegroundColor Cyan
+            Write-Host "  ║  To download it, use one of these methods:                   ║" -ForegroundColor Cyan
+            Write-Host "  ║                                                              ║" -ForegroundColor Cyan
+            Write-Host "  ║  1. Run:  download $OutputPath" -ForegroundColor Yellow -NoNewline
+            Write-Host "$(' ' * [Math]::Max(0, 62 - 16 - $OutputPath.Length))║" -ForegroundColor Cyan
+            Write-Host "  ║  2. Use the Cloud Shell file manager (upload/download icon)  ║" -ForegroundColor Cyan
+            Write-Host "  ║  3. Copy to Azure Storage:                                   ║" -ForegroundColor Cyan
+            Write-Host "  ║       azcopy copy `"$OutputPath`" `"<blob-sas-url>`"" -ForegroundColor Yellow -NoNewline
+            Write-Host "       ║" -ForegroundColor Cyan
+            Write-Host "  ╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+        } else {
+            Write-Host "Opening report..." -ForegroundColor Cyan
+            Invoke-Item $OutputPath
+        }
     }
 
 } catch {
